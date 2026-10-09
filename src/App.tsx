@@ -10,8 +10,7 @@ import { IfcParser } from '@ifc-lite/parser';
 import { GeometryProcessor } from '@ifc-lite/geometry';
 import { Renderer } from '@ifc-lite/renderer';
 import { createDecodeWorkerSource, LazStreamingSource } from '@ifc-lite/pointcloud';
-import { ConnectFiles, isConnectFolder, isSupportedConnectModel, type ConnectEntry } from './connect';
-import type { FolderEntry } from 'trimble-connect-sdk';
+import { ConnectFiles, isConnectFolder, isSupportedConnectModel, type ConnectEntry, type ConnectFolder } from './connect';
 import DxfParser from 'dxf-parser';
 import * as WorkspaceAPI from 'trimble-connect-workspace-api';
 
@@ -315,7 +314,7 @@ export default function App() {
       {showProperties && <aside className="properties-panel"><div className="properties-heading"><div><span className="panel-eyebrow">INSPEKTÖR</span><h2>Detaljer</h2></div><button className="mini-icon" onClick={() => setShowProperties(false)}><PanelRightClose size={16}/></button></div><div className="properties-tabs"><button className="property-active">Egenskaper</button><button onClick={() => setNotice('Mätningar visas när en modell är vald.')}>Mätningar</button></div>{active ? <><div className="selected-object"><div className="object-icon"><Cuboid size={18}/></div><div><b>{active.name}</b><small>{active.kind === 'IFC' ? 'IFC Building Model' : active.kind === 'DXF' ? 'CAD-ritning' : 'Punktmoln'}</small></div><button className="mini-icon" onClick={() => setNotice('Objektmeny öppnas efter import.')}><MoreHorizontal size={16}/></button></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> ÖVERSIKT</button><div className="property-row"><span>Format</span><b>{active.kind}</b></div><div className="property-row"><span>Storlek</span><b>{active.size}</b></div><div className="property-row"><span>Objekt</span><b>{entityTotal?.toLocaleString('sv-SE') || active.entities?.toLocaleString('sv-SE') || '—'}</b></div><div className="property-row"><span>Koordinatsystem</span><b className="unknown-value">Ej inläst</b></div></div><div className="property-section"><button className="property-section-title"><ChevronRight size={14}/> PLATSERING</button></div><div className="property-section"><button className="property-section-title"><ChevronRight size={14}/> EGENSKAPER</button></div></> : <div className="empty-inspector"><span><Cuboid size={21}/></span><b>Välj ett objekt</b><small>Markera ett objekt i vyn för att se dess egenskaper.</small></div>}<div className="inspector-bottom"><span className="inspector-help"><Sparkles size={14}/><span><b>Modellassistent</b><small>Fråga om modellen när den är ansluten.</small></span></span><button onClick={() => setNotice('Assistenten aktiveras efter att IFC-modellen är inläst.')}><ArrowRight size={15}/></button></div></aside>}
     </div>
     <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
-    {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} token={connectToken} activeFile={active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}
+    {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} projectRegion={connectProject?.region} token={connectToken} activeFile={active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}
     <div className="toast-host">{notice && <button className="toast" onClick={() => setNotice('')}><span className="toast-icon"><Check size={14}/></span>{notice}<X size={14}/></button>}</div>
   </div>;
 }
@@ -330,9 +329,10 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
   useEffect(() => {
     let alive = true;
     const onEvent = (event: string, args: any) => {
-      if (event === 'extension.accessToken' && typeof args?.data === 'string') {
-        tokenRef.current = args.data; setStatus('Projekt och användarsession anslutna.');
-        childRef.current?.postMessage({ type: 'tc-codex:session', project: projectRef.current, accessToken: args.data }, location.origin);
+      const eventToken = typeof args === 'string' ? args : args?.data;
+      if (event === 'extension.accessToken' && isAccessToken(eventToken)) {
+        tokenRef.current = eventToken; setStatus('Projekt och användarsession anslutna.');
+        childRef.current?.postMessage({ type: 'tc-codex:session', project: projectRef.current, accessToken: eventToken }, location.origin);
       }
     };
     const onMessage = (event: MessageEvent) => {
@@ -343,13 +343,17 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
     void (async () => {
       try {
         // Workspace API handshakes can take longer while the Connect viewer initializes.
-        const connection = await WorkspaceAPI.connect(window.parent, onEvent, 15000);
+        const connection = await WorkspaceAPI.connect(window.parent, onEvent, 30000);
         if (!alive) return;
         setApi(connection);
         const current = await connection.project.getCurrentProject();
         if (!alive) return;
         const rawProject = current as any;
-        const projectInfo = { id: rawProject?.id ?? rawProject?.projectId, name: rawProject?.name ?? rawProject?.projectName };
+        const projectInfo = {
+          id: rawProject?.id ?? rawProject?.projectId,
+          name: rawProject?.name ?? rawProject?.projectName,
+          region: rawProject?.location ?? rawProject?.region,
+        };
         projectRef.current = projectInfo;
         setProject(projectInfo); setStatus(projectInfo.name ? `Ansluten till ${projectInfo.name}` : 'Trimble Connect är redo.');
       } catch (reason) {
@@ -371,13 +375,13 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
     childRef.current = child;
     setStatus('Begär åtkomst till projektet…');
     try {
-      const token = await api?.extension.requestPermission('accesstoken');
-      if (typeof token === 'string' && token !== 'pending' && token !== 'denied') {
+      const token = await api.extension.requestPermission('accesstoken');
+      if (isAccessToken(token)) {
         tokenRef.current = token;
         child.postMessage({ type: 'tc-codex:session', project: projectRef.current, accessToken: token }, location.origin);
         setStatus('Editorn öppnas med projektets session.');
       } else if (token === 'denied') setStatus('Åtkomst nekades. Ändra tillståndet i extensionens inställningar.');
-      else setStatus('Godkänn Connect-åtkomst i Trimble Connect. Editorn väntar på sessionen.');
+      else setStatus('Väntar på att Trimble Connect ska godkänna åtkomsten.');
     } catch {
       setStatus('Editorn öppnas. Connect-sessionen kunde inte hämtas.');
     }
@@ -385,17 +389,21 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
   return <main className="trimble-launcher"><div className="trimble-card"><div className="trimble-brand"><span className="brand-mark">T<span/></span><span>TC <b>Codex</b></span><span className="trimble-tag">MODELLSTUDIO</span></div><span className="panel-eyebrow">EXTERN 3D-EDITOR</span><h1>Modellen vidare.<br/><em>Arbetet samlat.</em></h1><p>Öppna IFC, DXF och punktmoln i en fristående arbetsyta. Hämta och spara filer i projektets Connect-mappar.</p><div className="trimble-project"><span className="project-glyph">N</span><span><small>AKTIVT PROJEKT</small><b>{project?.name || 'Trimble Connect-projekt'}</b></span><span className="connect-state"><i/>{status}</span></div><button className="primary-button full-button" onClick={() => void launch()}>Öppna extern editor <ArrowRight size={16}/></button><button className="trimble-local" onClick={onOpenLocal}><Upload size={14}/> Öppna en lokal modell <span>IFC · DXF · PUNKTMOLN</span></button><div className="trimble-footer"><span><Check size={13}/> IFC</span><span><Check size={13}/> DXF</span><span>Punktmoln</span></div></div><div className="trimble-side"><span className="live-dot"/> Trimble Connect <span>/</span> Modellstudio</div></main>;
 }
 
+function isAccessToken(value: unknown): value is string {
+  return typeof value === 'string' && value.split('.').length === 3;
+}
+
 function ConnectDialog({ close }: { close: () => void }) {
   return <div className="modal-scrim" onMouseDown={(e) => e.target === e.currentTarget && close()}><section className="connect-modal"><button className="modal-close" onClick={close}><X size={17}/></button><span className="modal-mark"><Cloud size={21}/></span><span className="panel-eyebrow">TRIMBLE CONNECT</span><h2>Hämta filer från projektet</h2><p>Starta Modellstudio från din Connect-projektvy för att läsa in projekt och mappar med din användarsession.</p><div className="connect-steps"><div><span>01</span><b>Öppna i Connect</b><small>Starta TC Codex från projektets Apps & Capabilities.</small></div><ArrowRight size={15}/><div><span>02</span><b>Välj mapp</b><small>Välj en Connect-fil för att hämta den till 3D-editorn.</small></div></div><div className="modal-note"><span className="live-dot"/> Ingen Connect-session hittades i den här fliken ännu.</div><button className="primary-button full-button" onClick={close}>Tillbaka till arbetsplatsen <ArrowRight size={16}/></button><small className="modal-footnote">När projektets session är ansluten finns mapphämtning och uppladdning i editorns Connect-panel.</small></section></div>;
 }
 
-function FilesDialog({ close, models, open, projectId, projectName, token, activeFile, onImport, onNotice }: {
+function FilesDialog({ close, models, open, projectId, projectName, projectRegion, token, activeFile, onImport, onNotice }: {
   close: () => void; models: LocalModel[]; open: (model: LocalModel) => void;
-  projectId?: string; projectName?: string; token: string | null; activeFile?: File;
+  projectId?: string; projectName?: string; projectRegion?: string; token: string | null; activeFile?: File;
   onImport: (file: File) => void; onNotice: (message: string) => void;
 }) {
   const [client, setClient] = useState<ConnectFiles | null>(null);
-  const [path, setPath] = useState<FolderEntry[]>([]);
+  const [path, setPath] = useState<ConnectFolder[]>([]);
   const [entries, setEntries] = useState<ConnectEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -405,13 +413,13 @@ function FilesDialog({ close, models, open, projectId, projectName, token, activ
     if (!projectId || !token) return;
     let alive = true;
     setLoading(true);
-    void ConnectFiles.open(projectId, token).then((connection) => {
+    void ConnectFiles.open(projectId, token, projectRegion).then((connection) => {
       if (alive) { setClient(connection); setError(''); }
     }).catch((reason) => {
       if (alive) setError(reason instanceof Error ? reason.message : 'Kunde inte ansluta till Trimble Connect Core API.');
     }).finally(() => { if (alive) setLoading(false); });
     return () => { alive = false; };
-  }, [projectId, token]);
+  }, [projectId, projectRegion, token]);
 
   useEffect(() => {
     if (!client) return;
