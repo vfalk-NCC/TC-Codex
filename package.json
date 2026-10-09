@@ -1,0 +1,29 @@
+{
+  "name": "tc-codex",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@ifc-lite/geometry": "^1.18.0",
+    "@ifc-lite/parser": "^2.4.0",
+    "@ifc-lite/renderer": "1.21.0",
+    "@ifc-lite/wasm": "^1.19.2",
+    "dxf-parser": "^1.1.2",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "trimble-connect-workspace-api": "^0.3.38"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "~5.7.2",
+    "vite": "^6.0.1"
+  }
+}
