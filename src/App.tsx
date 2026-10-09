@@ -420,7 +420,7 @@ export default function App() {
       const point = picked.worldXYZ;
       if (!measurePoint) { setMeasurePoint(point); setMeasurement(null); setNotice('Första mätpunkten vald. Välj nästa punkt.'); }
       else {
-        const distance = Math.hypot(point.x - measurePoint.x, point.y - measurePoint.y, point.z - measurePoint.z);
+        const distance = Math.hypot(point.x - measurePoint.x, point.y - measurePoint.y, point.z - measurePoint.z) * (ifcStore?.lengthUnitScale ?? 1);
         setMeasurement(distance); setMeasurePoint(null); setNotice(`Avstånd: ${distance.toFixed(3)} m`);
       }
       return;
