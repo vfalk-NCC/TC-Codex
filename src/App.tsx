@@ -1,13 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type PointerEvent } from 'react';
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, Box, Check, ChevronDown, ChevronRight,
   CircleHelp, Cloud, Command, Cuboid, FileBox, FileImage, FilePlus2, Folder,
   FolderOpen, Grid2X2, HardDrive, Layers3, Link2, ListFilter, Maximize2,
   MoreHorizontal, MousePointer2, PanelLeftClose, PanelRightClose, Plus, Search,
   Settings2, Share2, SlidersHorizontal, Sparkles, Upload, X, Eye, EyeOff,
-  Ruler, Scissors, ExternalLink, KeyRound, Download,
+  Ruler, Scissors, ExternalLink, KeyRound, Download, Move3D,
 } from 'lucide-react';
-import { IfcParser, extractPropertiesOnDemand, extractQuantitiesOnDemand, extractEntityAttributesOnDemand, type IfcDataStore } from '@ifc-lite/parser';
+import { IfcParser, extractPropertiesOnDemand, extractQuantitiesOnDemand, extractEntityAttributesOnDemand, parseStepValue, serializeValue, ref as stepRef, type IfcDataStore, type StepValue } from '@ifc-lite/parser';
 import { GeometryProcessor } from '@ifc-lite/geometry';
 import { Renderer } from '@ifc-lite/renderer';
 import { createDecodeWorkerSource, LazStreamingSource } from '@ifc-lite/pointcloud';
@@ -31,6 +31,126 @@ function formatBytes(bytes: number) {
   if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
   if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+type DxfTranslation = { dx: number; dy: number };
+function applyDxfTranslations(source: string, changes: Map<string, DxfTranslation>) {
+  const lines = source.split(/\r?\n/);
+  let entityType = '', handle = '';
+  let dxfLineType = 0;
+  for (let i = 0; i + 1 < lines.length; i += 2) {
+    const code = Number(lines[i].trim());
+    const value = lines[i + 1];
+    if (code === 0) { entityType = value.trim().toUpperCase(); handle = ''; dxfLineType = 0; continue; }
+    if (code === 5) { handle = value.trim().toUpperCase(); continue; }
+    const change = changes.get(handle);
+    if (!change) continue;
+    let amount = 0;
+    if (entityType === 'LINE' && (code === 10 || code === 11)) dxfLineType = code;
+    if ((entityType === 'LINE' && dxfLineType && (code === 20 || code === 21)) || (['LWPOLYLINE', 'CIRCLE', 'ARC'].includes(entityType) && (code === 20))) amount = change.dy;
+    if ((entityType === 'LINE' && (code === 10 || code === 11)) || (['LWPOLYLINE', 'CIRCLE', 'ARC'].includes(entityType) && code === 10)) amount = change.dx;
+    if (amount) {
+      const number = Number(value.trim());
+      if (Number.isFinite(number)) lines[i + 1] = `${number + amount}`;
+    }
+  }
+  return lines.join('\n');
+}
+
+type StepReference = { ref: number };
+type StepRecord = { id: number; type: string; args: StepValue[]; offset: number; length: number };
+function stepReference(value: StepValue | undefined): number | null {
+  return value && typeof value === 'object' && 'ref' in value ? (value as StepReference).ref : null;
+}
+function readStepRecord(store: IfcDataStore, id: number): StepRecord | null {
+  const source = store.source;
+  const entityRef = store.entityIndex.byId.get(id);
+  if (!entityRef || entityRef.byteLength <= 0) return null;
+  const raw = new TextDecoder().decode(source.subarray(entityRef.byteOffset, entityRef.byteOffset + entityRef.byteLength));
+  const match = raw.match(/^\s*#\d+\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*)\)\s*;?\s*$/i);
+  if (!match) return null;
+  const parsed = parseStepValue(`(${match[2]})`);
+  if (!Array.isArray(parsed)) return null;
+  return { id, type: match[1].toUpperCase(), args: parsed as StepValue[], offset: entityRef.byteOffset, length: entityRef.byteLength };
+}
+type AxisBasis = [number[], number[], number[]];
+const identityBasis: AxisBasis = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+const normalize3 = (value: number[]) => { const length = Math.hypot(value[0], value[1], value[2]) || 1; return value.map((n) => n / length); };
+const dot3 = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a: number[], b: number[]) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const rotateBy = (basis: AxisBasis, vector: number[]) => basis[0].map((_, i) => basis[0][i] * vector[0] + basis[1][i] * vector[1] + basis[2][i] * vector[2]);
+function ifcPlacementBasis(store: IfcDataStore, placementId: number | null, trail = new Set<number>()): AxisBasis {
+  if (!placementId || trail.has(placementId)) return identityBasis;
+  trail.add(placementId);
+  const local = readStepRecord(store, placementId);
+  if (!local || local.type !== 'IFCLOCALPLACEMENT') throw new Error('Objektets IFC-placering stöds inte för flytt.');
+  const parentId = stepReference(local.args[0]);
+  const axisId = stepReference(local.args[1]);
+  const axisPlacement = axisId ? readStepRecord(store, axisId) : null;
+  if (!axisPlacement || !axisPlacement.type.startsWith('IFCAXIS2PLACEMENT')) throw new Error('Objektets IFC-axelplacering saknas.');
+  const direction = (id: number | null, fallback: number[]) => {
+    const record = id ? readStepRecord(store, id) : null;
+    const ratios = record?.args[0];
+    return Array.isArray(ratios) ? normalize3(ratios.map((part) => Number(part))) : fallback;
+  };
+  const localZ = direction(stepReference(axisPlacement.args[1]), [0, 0, 1]);
+  let localX = direction(stepReference(axisPlacement.args[2]), [1, 0, 0]);
+  localX = normalize3(localX.map((component, i) => component - dot3(localX, localZ) * localZ[i]));
+  const localY = normalize3(cross3(localZ, localX));
+  const parentBasis = ifcPlacementBasis(store, parentId, trail);
+  return [rotateBy(parentBasis, localX), rotateBy(parentBasis, localY), rotateBy(parentBasis, localZ)];
+}
+function createTranslatedIfcFile(file: File, store: IfcDataStore, moves: Map<number, [number, number, number]>) {
+  const replacements: Array<{ offset: number; length: number; bytes: Uint8Array }> = [];
+  const appended: string[] = [];
+  let nextId = Math.max(...Array.from(store.entityIndex.byId.keys())) + 1;
+  for (const [expressId, viewerMove] of moves) {
+    if (viewerMove.every((value) => Math.abs(value) < 1e-9)) continue;
+    const product = readStepRecord(store, expressId);
+    const originalPlacementId = product && stepReference(product.args[5]);
+    const originalPlacement = originalPlacementId ? readStepRecord(store, originalPlacementId) : null;
+    if (!product || !originalPlacement || originalPlacement.type !== 'IFCLOCALPLACEMENT') throw new Error(`IFC-objekt #${expressId} saknar en redigerbar IfcLocalPlacement.`);
+    const relativeId = stepReference(originalPlacement.args[1]);
+    const axisPlacement = relativeId ? readStepRecord(store, relativeId) : null;
+    if (!axisPlacement || axisPlacement.type !== 'IFCAXIS2PLACEMENT3D') throw new Error(`IFC-objekt #${expressId} använder en placering som inte kan flyttas säkert.`);
+    const pointId = stepReference(axisPlacement.args[0]);
+    const point = pointId ? readStepRecord(store, pointId) : null;
+    if (!point || point.type !== 'IFCCARTESIANPOINT' || !Array.isArray(point.args[0])) throw new Error(`IFC-objekt #${expressId} saknar en giltig koordinatpunkt.`);
+    const scale = store.lengthUnitScale || 1;
+    const deltaIfcWorld = [viewerMove[0] / scale, -viewerMove[2] / scale, viewerMove[1] / scale];
+    const parentBasis = ifcPlacementBasis(store, stepReference(originalPlacement.args[0]));
+    const deltaParent = [0, 1, 2].map((axis) => dot3(parentBasis[axis], deltaIfcWorld));
+    const coords = (point.args[0] as StepValue[]).map((value, i) => Number(value) + (deltaParent[i] || 0));
+    const pointIdNew = nextId++, axisIdNew = nextId++, placementIdNew = nextId++;
+    appended.push(`#${pointIdNew}=IFCCARTESIANPOINT(${serializeValue([coords])});`);
+    const axisArgs = [...axisPlacement.args]; axisArgs[0] = stepRef(pointIdNew);
+    appended.push(`#${axisIdNew}=IFCAXIS2PLACEMENT3D(${axisArgs.map((value) => serializeValue(value)).join(',')});`);
+    const placementArgs = [...originalPlacement.args]; placementArgs[1] = stepRef(axisIdNew);
+    appended.push(`#${placementIdNew}=IFCLOCALPLACEMENT(${placementArgs.map((value) => serializeValue(value)).join(',')});`);
+    const productArgs = [...product.args]; productArgs[5] = stepRef(placementIdNew);
+    const updated = `#${product.id}=${product.type}(${productArgs.map((value) => serializeValue(value)).join(',')});`;
+    replacements.push({ offset: product.offset, length: product.length, bytes: new TextEncoder().encode(updated) });
+  }
+  if (replacements.length === 0) throw new Error('Inga IFC-förflyttningar att spara.');
+  const source = store.source;
+  const marker = new TextEncoder().encode('ENDSEC;');
+  let insertAt = -1;
+  outer: for (let i = source.length - marker.length; i >= 0; i--) {
+    for (let j = 0; j < marker.length; j++) if (source[i + j] !== marker[j]) continue outer;
+    insertAt = i; break;
+  }
+  if (insertAt < 0) throw new Error('IFC-filens DATA-sektion kunde inte hittas.');
+  replacements.push({ offset: insertAt, length: 0, bytes: new TextEncoder().encode(`${appended.join('\n')}\n`) });
+  replacements.sort((a, b) => a.offset - b.offset);
+  const chunks: Uint8Array[] = []; let cursor = 0;
+  for (const item of replacements) {
+    if (item.offset < cursor) throw new Error('IFC-ändringarna överlappar i STEP-filen.');
+    chunks.push(source.subarray(cursor, item.offset), item.bytes); cursor = item.offset + item.length;
+  }
+  chunks.push(source.subarray(cursor));
+  const suffix = `_redigerad_${new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12)}`;
+  const dot = file.name.lastIndexOf('.'); const name = dot > 0 ? `${file.name.slice(0, dot)}${suffix}${file.name.slice(dot)}` : `${file.name}${suffix}.ifc`;
+  return new File(chunks, name, { type: 'application/x-step', lastModified: Date.now() });
 }
 
 function GltfViewport({ file, onStatus }: { file: File; onStatus: (message: string) => void }) {
@@ -241,6 +361,109 @@ function Drawing({ active, onFit }: { active: LocalModel | null; onFit: () => vo
   </div>;
 }
 
+function EditableDrawing({ active, onFit, onModified }: { active: LocalModel | null; onFit: () => void; onModified: (file: File) => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const dragRef = useRef<{ handle: string; x: number; y: number } | null>(null);
+  const viewRef = useRef<{ minX: number; minY: number; scale: number } | null>(null);
+  const [entities, setEntities] = useState<any[]>([]);
+  const [sourceText, setSourceText] = useState('');
+  const [translations, setTranslations] = useState<Map<string, DxfTranslation>>(new Map());
+  const [selectedHandle, setSelectedHandle] = useState<string | null>(null);
+  const [drawn, setDrawn] = useState(false);
+  const [status, setStatus] = useState('Väntar på modell');
+  useEffect(() => {
+    if (!active?.file || active.kind !== 'DXF') { setEntities([]); setSourceText(''); setTranslations(new Map()); setSelectedHandle(null); setDrawn(false); setStatus(active?.kind === 'IFC' ? 'IFC-modell laddas i 3D-vyn' : 'Väntar på modell'); return; }
+    let cancelled = false; setStatus('Läser DXF…');
+    void active.file.text().then((text) => {
+      if (cancelled) return;
+      const doc = new DxfParser().parseSync(text);
+      setSourceText(text); setEntities(doc?.entities || []); setTranslations(new Map()); setSelectedHandle(null);
+      setStatus((doc?.entities || []).length.toLocaleString('sv-SE') + ' objekt · dra för att flytta'); setDrawn(true);
+    }).catch((error) => { if (!cancelled) { setDrawn(false); setStatus(error instanceof Error ? error.message : 'Kunde inte läsa DXF-filen.'); } });
+    return () => { cancelled = true; };
+  }, [active?.file, active?.kind]);
+  const geometry = (entity: any, change?: DxfTranslation) => {
+    const dx = change?.dx || 0, dy = change?.dy || 0;
+    const move = (point: any) => ({ x: point.x + dx, y: point.y + dy });
+    return { vertices: (entity.vertices || []).map(move), center: entity.center ? move(entity.center) : null };
+  };
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas || !drawn) return;
+    const draw = () => {
+      const rect = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.max(1, rect.width * dpr); canvas.height = Math.max(1, rect.height * dpr);
+      const ctx = canvas.getContext('2d'); if (!ctx) return;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.fillStyle = '#121612'; ctx.fillRect(0, 0, rect.width, rect.height);
+      const points: Array<[number, number]> = [];
+      entities.forEach((entity) => {
+        const geo = geometry(entity, translations.get(String(entity.handle).toUpperCase()));
+        geo.vertices.forEach((point: any) => points.push([point.x, point.y]));
+        if (geo.center) points.push([geo.center.x - entity.radius, geo.center.y - entity.radius], [geo.center.x + entity.radius, geo.center.y + entity.radius]);
+      });
+      if (!points.length) return;
+      const minX = Math.min(...points.map((p) => p[0])), maxX = Math.max(...points.map((p) => p[0]));
+      const minY = Math.min(...points.map((p) => p[1])), maxY = Math.max(...points.map((p) => p[1]));
+      const scale = Math.min((rect.width - 100) / Math.max(1, maxX - minX), (rect.height - 100) / Math.max(1, maxY - minY));
+      viewRef.current = { minX, minY, scale };
+      const project = (x: number, y: number) => [50 + (x - minX) * scale, rect.height - 50 - (y - minY) * scale] as const;
+      entities.forEach((entity) => {
+        const selected = String(entity.handle).toUpperCase() === selectedHandle, geo = geometry(entity, translations.get(String(entity.handle).toUpperCase()));
+        ctx.beginPath(); ctx.strokeStyle = selected ? '#d6f36a' : '#d8e6c0'; ctx.lineWidth = selected ? 2.5 : 1.15;
+        if (entity.type === 'LINE' && geo.vertices.length >= 2) { const a = project(geo.vertices[0].x, geo.vertices[0].y), b = project(geo.vertices[1].x, geo.vertices[1].y); ctx.moveTo(...a); ctx.lineTo(...b); }
+        else if (entity.type === 'LWPOLYLINE' && geo.vertices.length >= 2) { ctx.moveTo(...project(geo.vertices[0].x, geo.vertices[0].y)); geo.vertices.slice(1).forEach((p: any) => ctx.lineTo(...project(p.x, p.y))); if (entity.shape) ctx.closePath(); }
+        else if (entity.type === 'CIRCLE' && geo.center) { const p = project(geo.center.x, geo.center.y); ctx.arc(p[0], p[1], entity.radius * scale, 0, Math.PI * 2); }
+        else if (entity.type === 'ARC' && geo.center) { const p = project(geo.center.x, geo.center.y); ctx.arc(p[0], p[1], entity.radius * scale, -entity.endAngle, -entity.startAngle); }
+        ctx.stroke();
+      });
+    };
+    draw(); const observer = new ResizeObserver(draw); observer.observe(canvas); return () => observer.disconnect();
+  }, [entities, translations, selectedHandle, drawn]);
+  const pointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
+    const canvas = event.currentTarget, rect = canvas.getBoundingClientRect(), view = viewRef.current; if (!view) return;
+    const px = event.clientX - rect.left, py = event.clientY - rect.top;
+    let closest: { handle: string; distance: number } | null = null;
+    const screen = (point: any) => [50 + (point.x - view.minX) * view.scale, rect.height - 50 - (point.y - view.minY) * view.scale];
+    const segmentDistance = (a: any, b: any) => {
+      const [ax, ay] = screen(a), [bx, by] = screen(b), vx = bx - ax, vy = by - ay;
+      const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / (vx * vx + vy * vy || 1)));
+      return Math.hypot(px - (ax + t * vx), py - (ay + t * vy));
+    };
+    entities.forEach((entity) => {
+      const handle = String(entity.handle || '').toUpperCase(); if (!handle) return;
+      const geo = geometry(entity, translations.get(handle)); let distance = Infinity;
+      if (entity.type === 'LINE' && geo.vertices.length >= 2) distance = segmentDistance(geo.vertices[0], geo.vertices[1]);
+      if (entity.type === 'LWPOLYLINE' && geo.vertices.length >= 2) for (let i = 1; i < geo.vertices.length; i++) distance = Math.min(distance, segmentDistance(geo.vertices[i - 1], geo.vertices[i]));
+      if (['CIRCLE', 'ARC'].includes(entity.type) && geo.center) { const [cx, cy] = screen(geo.center); distance = Math.abs(Math.hypot(px - cx, py - cy) - entity.radius * view.scale); }
+      if (distance < 13 && (!closest || distance < closest.distance)) closest = { handle, distance };
+    });
+    if (!closest) { setSelectedHandle(null); return; }
+    const handle = (closest as { handle: string }).handle;
+    setSelectedHandle(handle); dragRef.current = { handle, x: event.clientX, y: event.clientY }; canvas.setPointerCapture(event.pointerId);
+    setStatus((entities.find((entity) => String(entity.handle).toUpperCase() === handle)?.type || 'DXF-objekt') + ' · dra för att flytta');
+  };
+  const pointerMove = (event: PointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current, scale = viewRef.current?.scale; if (!drag || !scale) return;
+    const dx = (event.clientX - drag.x) / scale, dy = -(event.clientY - drag.y) / scale;
+    if (Math.abs(dx) < 1e-8 && Math.abs(dy) < 1e-8) return;
+    setTranslations((current) => { const next = new Map(current), old = next.get(drag.handle) || { dx: 0, dy: 0 }; next.set(drag.handle, { dx: old.dx + dx, dy: old.dy + dy }); return next; });
+    drag.x = event.clientX; drag.y = event.clientY;
+  };
+  const saveDrawing = () => {
+    if (!active?.file || translations.size === 0) return;
+    const text = applyDxfTranslations(sourceText, translations), suffix = '_redigerad_' + new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
+    const dot = active.file.name.lastIndexOf('.'), name = dot > 0 ? active.file.name.slice(0, dot) + suffix + '.dxf' : active.file.name + suffix + '.dxf';
+    onModified(new File([text], name, { type: 'application/dxf', lastModified: Date.now() }));
+    setStatus('Ändringarna sparades i en ny DXF-fil. Välj ”Spara till Connect” för uppladdning.');
+  };
+  return <div className={'viewport-stage ' + (active?.kind === 'DXF' && drawn ? 'drawing-mode' : '')}>
+    <div className="viewport-grid"/><canvas ref={canvasRef} className="drawing-canvas" aria-label="DXF-ritning" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={() => { dragRef.current = null; }} onPointerCancel={() => { dragRef.current = null; }}/>
+    {(!active || (active.kind === 'IFC' && !active.file) || (active.kind === 'Punktmoln' && !active.file)) && <svg className="model-art" viewBox="0 0 900 600" role="img" aria-label="Modellförhandsvisning"><defs><linearGradient id="facade" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stopColor="#d9e2ca"/><stop offset="1" stopColor="#929d8c"/></linearGradient><linearGradient id="roof" x1="0" y1="0" x2="1" y2="0"><stop stopColor="#777f71"/><stop offset="1" stopColor="#4c554c"/></linearGradient></defs><ellipse cx="454" cy="496" rx="330" ry="53" fill="#0a0d0b" opacity=".42"/><path d="M180 270 487 132 732 218 425 355Z" fill="url(#roof)" stroke="#edf2db" strokeOpacity=".34"/><path d="M180 270 425 355 425 472 180 386Z" fill="#52655c" stroke="#d5dec9" strokeOpacity=".52"/><path d="M425 355 732 218 732 334 425 472Z" fill="url(#facade)" stroke="#f3f5e9" strokeOpacity=".66"/><path d="M218 267 270 244 270 414 218 396ZM295 234 350 210 350 441 295 422ZM489 350 541 327 541 419 489 443ZM568 315 622 290 622 385 568 408ZM649 279 698 257 698 352 649 375Z" fill="#1d3030" stroke="#adbaa7" strokeWidth="2" opacity=".92"/><path d="M425 355 732 218M180 270 487 132M425 355V472M180 270V386M732 218V334" stroke="#f1f5e8" strokeOpacity=".3"/><path d="M162 487h551M199 505h450" stroke="#d6f36a" strokeOpacity=".24" strokeDasharray="5 7"/><path d="m172 484 62-26m-30 42 62-26m474-242 42-19m-40 87 42-19" stroke="#d6f36a" strokeWidth="1.2" opacity=".58"/></svg>}
+    {!drawn && <div className="stage-watermark"><span className="watermark-icon"><Cuboid size={20}/></span><span>{active?.name || 'Modellvy'}</span><i/>{status}</div>}
+    {active?.kind === 'DXF' && drawn && <div className="drawing-edit-tools"><span>{selectedHandle ? 'VALD · ' + selectedHandle : 'Klicka och dra för att flytta objekt'}</span>{translations.size > 0 && <button onClick={saveDrawing}><Check size={13}/> Spara DXF-kopia</button>}</div>}
+    <button className="fit-button" aria-label="Anpassa vy" onClick={onFit}><Maximize2 size={15}/></button><div className="axis-widget"><span>Z</span><div/><span>X</span></div>
+  </div>;
+}
+
 export default function App() {
   const [route, setRoute] = useState(location.hash === '#/editor' ? 'editor' : location.hash === '#/trimble' ? 'trimble' : 'home');
   const [models, setModels] = useState<LocalModel[]>(starterModels);
@@ -254,6 +477,9 @@ export default function App() {
   const [ifcStore, setIfcStore] = useState<IfcDataStore | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [selectedProperties, setSelectedProperties] = useState<Array<{ name: string; value: string }>>([]);
+  const [pendingEditFile, setPendingEditFile] = useState<File | null>(null);
+  const [moveDistance, setMoveDistance] = useState({ x: '0.10', y: '0', z: '0' });
+  const [ifcMoves, setIfcMoves] = useState<Map<number, [number, number, number]>>(new Map());
   const [hiddenIds, setHiddenIds] = useState<Set<number>>(new Set());
   const [isolatedIds, setIsolatedIds] = useState<Set<number> | null>(null);
   const [sectionOn, setSectionOn] = useState(false);
@@ -399,12 +625,12 @@ export default function App() {
     if (!kind) { setNotice('Välj IFC, DXF, glTF/GLB/ZIP eller en punktmolnsfil.'); return; }
     const item: LocalModel = { name: file.name, size: formatBytes(file.size), kind, file };
     setModels((current) => [item, ...current.filter((m) => m.name !== item.name)]);
-    setActive(item); setSelectedId(null); setSelectedProperties([]); setMeasurePoint(null); setMeasurement(null); setHiddenIds(new Set()); setIsolatedIds(null); setShowImport(false); setRoute('editor'); location.hash = '/editor';
+    setActive(item); setSelectedId(null); setSelectedProperties([]); setPendingEditFile(null); setIfcMoves(new Map()); setMeasurePoint(null); setMeasurement(null); setHiddenIds(new Set()); setIsolatedIds(null); setShowImport(false); setRoute('editor'); location.hash = '/editor';
     if (kind === 'Punktmoln') setNotice('Punktmolnsfilen har lagts till.');
   };
 
   const openModel = (model: LocalModel) => {
-    setActive(model); setEntityTotal(model.entities ?? null); setSelectedId(null); setSelectedProperties([]); setMeasurePoint(null); setMeasurement(null); setHiddenIds(new Set()); setIsolatedIds(null); setShowFiles(false); setRoute('editor');
+    setActive(model); setEntityTotal(model.entities ?? null); setSelectedId(null); setSelectedProperties([]); setPendingEditFile(null); setIfcMoves(new Map()); setMeasurePoint(null); setMeasurement(null); setHiddenIds(new Set()); setIsolatedIds(null); setShowFiles(false); setRoute('editor');
     location.hash = '/editor';
     if (model.kind === 'Punktmoln' && !model.file) setNotice('Välj en lokal punktmolnsfil för att börja.');
     if (model.kind === 'IFC' && !model.file) setNotice('Exempelfilen finns i modellistan. Importera en lokal IFC för att visa geometrin.');
@@ -452,6 +678,22 @@ export default function App() {
   };
   const resetVisibility = () => { setHiddenIds(new Set()); setIsolatedIds(null); setNotice('Alla IFC-objekt visas igen.'); };
 
+  const moveIfcSelection = () => {
+    if (active?.kind !== 'IFC' || !active.file || !ifcStore || !selectedId || !rendererRef.current) { setNotice('Markera ett IFC-element som går att flytta.'); return; }
+    const scale = ifcStore.lengthUnitScale || 1;
+    const meters: [number, number, number] = [Number(moveDistance.x), Number(moveDistance.y), Number(moveDistance.z)];
+    if (meters.some((value) => !Number.isFinite(value)) || meters.every((value) => value === 0)) { setNotice('Ange en förflyttning i meter.'); return; }
+    const rendererDelta: [number, number, number] = [meters[0] / scale, meters[1] / scale, meters[2] / scale];
+    const nextMoves = new Map(ifcMoves), previous = nextMoves.get(selectedId) || [0, 0, 0] as [number, number, number];
+    nextMoves.set(selectedId, [previous[0] + meters[0], previous[1] + meters[1], previous[2] + meters[2]]);
+    try {
+      const editedFile = createTranslatedIfcFile(active.file, ifcStore, nextMoves);
+      const moved = rendererRef.current.getScene().translateMeshesForEntity(selectedId, rendererDelta);
+      if (!moved) { setNotice('Det här IFC-elementet ligger i delad geometri och kan inte flyttas separat i den här modellen.'); return; }
+      setIfcMoves(nextMoves); setPendingEditFile(editedFile); setNotice(`IFC-element #${selectedId} flyttat ${meters.map((value) => value.toFixed(2)).join(', ')} m. En redigerad kopia är klar för Connect.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'IFC-ändringen kunde inte sparas.'); }
+  };
+
   const exportModel = () => {
     if (!active?.file) { setNotice('Öppna en lokal modell för att exportera eller synka den till projektet.'); return; }
     const url = URL.createObjectURL(active.file); const a = document.createElement('a'); a.href = url; a.download = active.name; a.click(); URL.revokeObjectURL(url);
@@ -493,17 +735,17 @@ export default function App() {
       <aside className="model-panel"><div className="panel-heading"><div><span className="panel-eyebrow">ARBETSPLATS</span><h2>Modellfiler</h2></div><button className="mini-icon" title="Lägg till fil" onClick={() => inputRef.current?.click()}><Plus size={16}/></button></div><button className="connect-folder" onClick={() => setShowFiles(true)}><span className="folder-square"><Cloud size={16}/></span><span><b>Trimble Connect</b><small>{connectProject?.name || 'NSV · DP1, DP2 & DP3'}</small></span><ChevronRight size={15}/></button><div className="search-box"><Search size={14}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Sök modell eller ritning"/><kbd>⌘ K</kbd></div><div className="list-heading"><span>ARBETSFILER <b>{visibleModels.length}</b></span><button onClick={() => setShowConnect(true)}><ListFilter size={14}/></button></div><div className="model-list">{visibleModels.map((model, i) => <button key={model.name} onClick={() => openModel(model)} className={`model-row ${active?.name === model.name ? 'model-active' : ''}`}><span className={`file-chip ${model.kind === 'IFC' ? 'ifc-chip' : model.kind === 'DXF' ? 'dxf-chip' : 'cloud-chip'}`}>{model.kind === 'Punktmoln' ? 'LAS' : model.kind}</span><span className="model-info"><b>{model.name}</b><small>{model.size} <i>·</i> {model.entities ? `${model.entities.toLocaleString('sv-SE')} objekt` : 'Connect-fil'}</small></span><span className="row-more"><MoreHorizontal size={15}/></span></button>)}</div><button className="add-model-button" onClick={() => inputRef.current?.click()}><Plus size={15}/> Lägg till lokal fil</button><button className="library-button" onClick={() => setShowSketchfab(true)}><Cuboid size={14}/> Sök Sketchfab</button><button className="library-button" onClick={() => { window.open('https://3dwarehouse.sketchup.com/', '_blank', 'noopener,noreferrer'); setNotice('3D Warehouse öppnades i en ny flik. Ladda ned en kompatibel IFC- eller glTF-modell för import.'); }}><ExternalLink size={14}/> Öppna 3D Warehouse</button><div className="panel-footer"><span className="storage-icon"><HardDrive size={14}/></span><span><b>Lokala filer</b><small>Bara dina öppna filer</small></span><button onClick={() => setShowFiles(true)}><Link2 size={14}/></button></div></aside>
       <main className="editor-main"><div className="editor-header"><div className="breadcrumb"><span>NSV · DP1, DP2 & DP3</span><ChevronRight size={13}/><b>{active?.name || 'Modellvy'}</b></div><div className="editor-header-actions"><span className="format-pill"><span className={active?.kind === 'DXF' ? 'format-orange' : ''}/>{active?.kind || '3D'}</span><button className="mini-icon" onClick={() => setNotice('Versioner hämtas från Trimble Connect när anslutningen är aktiv.')} title="Versionshistorik"><Command size={15}/></button><button className="mini-icon" onClick={() => setNotice('Fler vyer kommer snart.')} title="Vyinställningar"><Grid2X2 size={15}/></button></div></div><div className="editor-tabs"><button className={activeTab === 'modell' ? 'tab-active' : ''} onClick={() => setActiveTab('modell')}>Modell <span>01</span></button><button className={activeTab === 'projekt' ? 'tab-active' : ''} onClick={() => { setActiveTab('projekt'); setShowFiles(true); }}>Connect <span><Cloud size={12}/></span></button><button className="tab-add" onClick={() => setShowImport(true)}><Plus size={14}/></button></div>
         <div className="viewport-wrap" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files[0]) acceptFile(e.dataTransfer.files[0]); }}>
-          {active?.kind === 'GLTF' && active.file ? <GltfViewport file={active.file} onStatus={setNotice}/> : (active?.kind === 'IFC' || active?.kind === 'Punktmoln') && active.file ? <canvas ref={canvasRef} onClick={(event) => void selectViewport(event)} className={`ifc-canvas ${tool === 'measure' ? 'measure-cursor' : ''}`} aria-label={active.kind === 'IFC' ? 'IFC 3D-modell' : 'Punktmoln'} /> : <Drawing active={active} onFit={() => { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else if (canvasRef.current) renderFrame(canvasRef.current); setNotice('Vyn anpassad efter modellen.'); }}/ >}
+          {active?.kind === 'GLTF' && active.file ? <GltfViewport file={active.file} onStatus={setNotice}/> : (active?.kind === 'IFC' || active?.kind === 'Punktmoln') && active.file ? <canvas ref={canvasRef} onClick={(event) => void selectViewport(event)} className={`ifc-canvas ${tool === 'measure' ? 'measure-cursor' : ''}`} aria-label={active.kind === 'IFC' ? 'IFC 3D-modell' : 'Punktmoln'} /> : <EditableDrawing active={active} onModified={(file) => { setPendingEditFile(file); setNotice(`${file.name} klar att ladda upp till Trimble Connect.`); }} onFit={() => { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else if (canvasRef.current) renderFrame(canvasRef.current); setNotice('Vyn anpassad efter modellen.'); }}/ >}
           {active?.kind !== 'DXF' && (!active?.file || (active.kind === 'Punktmoln' && !active.file)) && <div className="scene-model" aria-hidden="true"><svg viewBox="0 0 900 500"><defs><linearGradient id="sfa" x2="1" y2="1"><stop stopColor="#cfdbc5"/><stop offset="1" stopColor="#9aa897"/></linearGradient></defs><ellipse cx="456" cy="407" rx="282" ry="37" fill="#000" opacity=".36"/><path d="m205 213 267-125 221 79-267 125z" fill="#59665d" stroke="#bac9b4"/><path d="m205 213 221 79v93l-221-80z" fill="#314139" stroke="#a8b7a5"/><path d="m426 292 267-125v94L426 385z" fill="url(#sfa)" stroke="#e3ead7"/><path d="m244 210 45-21v100l-45-16zm70-33 45-21v127l-45-16zm158 121 42-20v62l-42 20zm66-31 43-20v62l-43 20zm67-32 42-20v62l-42 20z" fill="#192624" stroke="#89998c"/><path d="m426 292 267-125M205 213l267-125" stroke="#f0f4e5" opacity=".56"/></svg></div>}
           <div className="viewport-hud"><span className="hud-live"><i/>{active?.file ? 'LOKAL MODELL' : 'FÖRHANDSVISNING'}</span><span className="hud-coords">{selectedId ? `IFC #${selectedId}` : 'X 0,00  ·  Y 0,00  ·  Z 0,00 m'}</span></div><div className="view-controls"><button className="viewcube">TOP</button><button onClick={() => setNotice('Perspektivvy aktiv.')}><Cuboid size={15}/></button><button title="Återställ synlighet" onClick={resetVisibility}><Eye size={15}/></button></div>
           {active?.kind === 'IFC' && active.file && (tool === 'section' || measurement !== null) && <div className="model-tool-popover">{tool === 'section' && <><div><Scissors size={14}/> <b>Snittplan</b><button onClick={() => setSectionOn((value) => !value)}>{sectionOn ? 'Av' : 'På'}</button></div><input aria-label="Snittplanets position" type="range" min="0" max="100" value={Math.round(sectionPosition * 100)} onChange={(e) => setSectionPosition(Number(e.target.value) / 100)}/><small>Vertikalt snitt · {Math.round(sectionPosition * 100)}%</small></>}{measurement !== null && <div><Ruler size={14}/> <b>{measurement.toFixed(3)} m</b><button onClick={() => { setMeasurement(null); setTool('measure'); }}>Ny mätning</button></div>}</div>}
           {busy && <div className="loading-banner"><span className="spinner"/>{notice || 'Laddar modell…'}</div>}
         </div><div className="statusbar"><span><span className="status-dot"/>{notice || (active?.file ? 'Modellen finns på din enhet' : 'Anslut Trimble Connect för att öppna projektfiler')}</span><span>{entityTotal ? `${entityTotal.toLocaleString('sv-SE')} entiteter` : 'METER'} <i/> ORTHO <i/> 1:100</span></div>
       </main>
-      {showProperties && <aside className="properties-panel"><div className="properties-heading"><div><span className="panel-eyebrow">INSPEKTÖR</span><h2>Detaljer</h2></div><button className="mini-icon" onClick={() => setShowProperties(false)}><PanelRightClose size={16}/></button></div><div className="properties-tabs"><button className="property-active">Egenskaper</button><button onClick={() => setNotice(measurement === null ? 'Välj Mät och klicka två punkter i IFC-modellen.' : `Senaste mätning: ${measurement.toFixed(3)} m`)}>Mätningar</button></div>{active ? <><div className="selected-object"><div className="object-icon"><Cuboid size={18}/></div><div><b>{selectedId ? `#${selectedId} · ${ifcStore?.entityIndex.byId.get(selectedId)?.type || 'IFC-objekt'}` : active.name}</b><small>{active.kind === 'IFC' ? 'IFC Building Model' : active.kind === 'DXF' ? 'CAD-ritning' : active.kind === 'GLTF' ? 'glTF / Sketchfab' : 'Punktmoln'}</small></div></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> ÖVERSIKT</button><div className="property-row"><span>Format</span><b>{active.kind}</b></div><div className="property-row"><span>Storlek</span><b>{active.size}</b></div><div className="property-row"><span>Objekt</span><b>{entityTotal?.toLocaleString('sv-SE') || active.entities?.toLocaleString('sv-SE') || '—'}</b></div><div className="property-row"><span>Koordinatsystem</span><b className="unknown-value">{ifcStore?.lengthUnitScale ? `IFC · ${ifcStore.lengthUnitScale} m/enhet` : 'Ej inläst'}</b></div></div>{active.kind === 'IFC' && <><div className="object-actions"><button onClick={hideSelected} disabled={!selectedId}><EyeOff size={14}/> Dölj</button><button onClick={isolateSelected} disabled={!selectedId}><Eye size={14}/> Isolera</button><button onClick={resetVisibility}><Maximize2 size={14}/> Visa alla</button></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> IFC-EGENSKAPER {selectedId ? `· #${selectedId}` : ''}</button>{selectedProperties.length ? selectedProperties.map((property, index) => <div className="property-row ifc-property-row" key={`${property.name}-${index}`}><span title={property.name}>{property.name}</span><b title={property.value}>{property.value}</b></div>) : <small className="ifc-empty-properties">Markera ett element i modellen för att läsa dess IFC-egenskaper och mängder.</small>}</div></>}</> : <div className="empty-inspector"><span><Cuboid size={21}/></span><b>Välj ett objekt</b><small>Markera ett objekt i vyn för att se dess egenskaper.</small></div>}<div className="inspector-bottom"><span className="inspector-help"><Sparkles size={14}/><span><b>Modellassistent</b><small>Fråga om modellen när den är ansluten.</small></span></span><button onClick={() => setNotice('Assistenten aktiveras efter att IFC-modellen är inläst.')}><ArrowRight size={15}/></button></div></aside>}
+      {showProperties && <aside className="properties-panel"><div className="properties-heading"><div><span className="panel-eyebrow">INSPEKTÖR</span><h2>Detaljer</h2></div><button className="mini-icon" onClick={() => setShowProperties(false)}><PanelRightClose size={16}/></button></div><div className="properties-tabs"><button className="property-active">Egenskaper</button><button onClick={() => setNotice(measurement === null ? 'Välj Mät och klicka två punkter i IFC-modellen.' : `Senaste mätning: ${measurement.toFixed(3)} m`)}>Mätningar</button></div>{active ? <><div className="selected-object"><div className="object-icon"><Cuboid size={18}/></div><div><b>{selectedId ? `#${selectedId} · ${ifcStore?.entityIndex.byId.get(selectedId)?.type || 'IFC-objekt'}` : active.name}</b><small>{active.kind === 'IFC' ? 'IFC Building Model' : active.kind === 'DXF' ? 'CAD-ritning' : active.kind === 'GLTF' ? 'glTF / Sketchfab' : 'Punktmoln'}</small></div></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> ÖVERSIKT</button><div className="property-row"><span>Format</span><b>{active.kind}</b></div><div className="property-row"><span>Storlek</span><b>{active.size}</b></div><div className="property-row"><span>Objekt</span><b>{entityTotal?.toLocaleString('sv-SE') || active.entities?.toLocaleString('sv-SE') || '—'}</b></div><div className="property-row"><span>Koordinatsystem</span><b className="unknown-value">{ifcStore?.lengthUnitScale ? `IFC · ${ifcStore.lengthUnitScale} m/enhet` : 'Ej inläst'}</b></div></div>{active.kind === 'IFC' && <><div className="object-actions"><button onClick={hideSelected} disabled={!selectedId}><EyeOff size={14}/> Dölj</button><button onClick={isolateSelected} disabled={!selectedId}><Eye size={14}/> Isolera</button><button onClick={resetVisibility}><Maximize2 size={14}/> Visa alla</button></div><div className="ifc-move-controls"><b>Flytta markerat element</b><small>Förflyttning i modellens X, Y och Z, meter</small><div>{(['x','y','z'] as const).map((axis) => <label key={axis}>{axis.toUpperCase()}<input type="number" step="0.1" value={moveDistance[axis]} onChange={(event) => setMoveDistance((current) => ({ ...current, [axis]: event.target.value }))}/></label>)}</div><button disabled={!selectedId} onClick={moveIfcSelection}><Move3D size={14}/> Flytta element</button></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> IFC-EGENSKAPER {selectedId ? `· #${selectedId}` : ''}</button>{selectedProperties.length ? selectedProperties.map((property, index) => <div className="property-row ifc-property-row" key={`${property.name}-${index}`}><span title={property.name}>{property.name}</span><b title={property.value}>{property.value}</b></div>) : <small className="ifc-empty-properties">Markera ett element i modellen för att läsa dess IFC-egenskaper och mängder.</small>}</div></>}</> : <div className="empty-inspector"><span><Cuboid size={21}/></span><b>Välj ett objekt</b><small>Markera ett objekt i vyn för att se dess egenskaper.</small></div>}<div className="inspector-bottom"><span className="inspector-help"><Sparkles size={14}/><span><b>Modellassistent</b><small>Fråga om modellen när den är ansluten.</small></span></span><button onClick={() => setNotice('Assistenten aktiveras efter att IFC-modellen är inläst.')}><ArrowRight size={15}/></button></div></aside>}
     </div>
     <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.glb,.gltf,.zip,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
-    {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} projectRegion={connectProject?.region} token={connectToken} activeFile={active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}{showSketchfab && <SketchfabDialog close={() => setShowSketchfab(false)} onImport={acceptFile} onNotice={setNotice} />}
+    {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} projectRegion={connectProject?.region} token={connectToken} activeFile={pendingEditFile || active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}{showSketchfab && <SketchfabDialog close={() => setShowSketchfab(false)} onImport={acceptFile} onNotice={setNotice} />}
     <div className="toast-host">{notice && <button className="toast" onClick={() => setNotice('')}><span className="toast-icon"><Check size={14}/></span>{notice}<X size={14}/></button>}</div>
   </div>;
 }
