@@ -11,12 +11,14 @@
   "dependencies": {
     "@ifc-lite/geometry": "^1.18.0",
     "@ifc-lite/parser": "^2.4.0",
+    "@ifc-lite/pointcloud": "0.11.0",
     "@ifc-lite/renderer": "1.21.0",
     "@ifc-lite/wasm": "^1.19.2",
     "dxf-parser": "^1.1.2",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "trimble-connect-sdk": "4.0.12",
     "trimble-connect-workspace-api": "^0.3.38"
   },
   "devDependencies": {

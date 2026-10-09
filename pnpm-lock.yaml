@@ -14,6 +14,9 @@ importers:
       '@ifc-lite/parser':
         specifier: ^2.4.0
         version: 2.4.2
+      '@ifc-lite/pointcloud':
+        specifier: 0.11.0
+        version: 0.11.0
       '@ifc-lite/renderer':
         specifier: 1.21.0
         version: 1.21.0
@@ -32,6 +35,9 @@ importers:
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
+      trimble-connect-sdk:
+        specifier: 4.0.12
+        version: 4.0.12
       trimble-connect-workspace-api:
         specifier: ^0.3.38
         version: 0.3.38
@@ -328,6 +334,9 @@ packages:
   '@ifc-lite/parser@2.4.2':
     resolution: {integrity: sha512-/HrA2PwHA624hVxzrsOYtYVHCOW/YHrU3oWSzJAfSr57thyRflxrNBbI7pFXiWZQqq1WRKlzj5PZcAmDoiiKJA==}
 
+  '@ifc-lite/pointcloud@0.11.0':
+    resolution: {integrity: sha512-my9ymYgP5MCV3GkigecJmABz4Lnzdozq6HlY3ceih21oHaM6vSmFqn142/QyXQiuUtDy4izAZr77bGgOmnkhZQ==}
+
   '@ifc-lite/pointcloud@0.7.2':
     resolution: {integrity: sha512-Du/2d+go3fqJMgz7NLT4nZPbDw8p8TkucUNrEUY3wEgr7r/1xbHPx9uhqeePCOQK8BNfYaIIkclil98Tp+0AEw==}
 
@@ -549,10 +558,18 @@ packages:
     peerDependencies:
       vite: ^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0
 
+  atob@2.1.2:
+    resolution: {integrity: sha512-Wm6ukoaOGJi/73p/cl2GvLjTI5JM1k/O14isD73YML8StrH/7/lRFgmg8nICZgD3bZZvjwCGxtMOD3wWNAu8cg==}
+    engines: {node: '>= 4.5.0'}
+    hasBin: true
+
   baseline-browser-mapping@2.11.27:
     resolution: {integrity: sha512-ElY12DaROGuan+lMmZ8Cvo/ZUbXPe7Enc/9VU/b1T3Kp4dwytRcNdR8DoSJN5SNJT/CuvcCA0DHDVmMOCePdRQ==}
     engines: {node: '>=6.0.0'}
     hasBin: true
+
+  browser-or-node@1.3.0:
+    resolution: {integrity: sha512-0F2z/VSnLbmEeBcUrSuDH5l0HxTXdQQzLjkmBR4cYfvg1zJrKSlmIZFqyFR8oX0NrwPhy3c3HQ6i3OxMbew4Tg==}
 
   browserslist@4.29.3:
     resolution: {integrity: sha512-1R4kiYKXGViqEN0CnoDrXc1StD9niAwu+j2dukWzrD4bJgsD4lDmEp0CRbc6E/vYJIfTHwPmwyaKtVSudICdPA==}
@@ -599,6 +616,15 @@ packages:
       picomatch: ^3 || ^4
     peerDependenciesMeta:
       picomatch:
+        optional: true
+
+  fetch-blob@2.1.2:
+    resolution: {integrity: sha512-YKqtUDwqLyfyMnmbw8XD6Q8j9i/HggKtPEI+pZ1+8bvheBu78biSmNaXWusx1TauGqtUUGx/cBb1mKdq2rLYow==}
+    engines: {node: ^10.17.0 || >=12.3.0}
+    peerDependencies:
+      domexception: '*'
+    peerDependenciesMeta:
+      domexception:
         optional: true
 
   fsevents@2.3.3:
@@ -698,6 +724,9 @@ packages:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
+  trimble-connect-sdk@4.0.12:
+    resolution: {integrity: sha512-t+s1J8Mj939micpgVHwpzo2Yyg/KHJwCAZe3UPyt92UJ8coYTPzrOhKnwGciF5GQbZAm//bb3H48u0BM/KOHJA==}
+
   trimble-connect-workspace-api@0.3.38:
     resolution: {integrity: sha512-KcmxJpRMAJ684ppsJp591GaURF5RSNC2eR8/c7Q60ze3oe0RVdjnsnMKoZk7b9Rdc3BwN1Bz+yJZWF2Ew1QVIw==}
 
@@ -750,6 +779,18 @@ packages:
       tsx:
         optional: true
       yaml:
+        optional: true
+
+  ws@7.5.13:
+    resolution: {integrity: sha512-rsKI6xDBFVf4r/x8XyChGK04QR/XHroxs/jUcoWvtEZM8TPU/X/uIY9B1CsSzYws9ZJb/6bbBu7dPhFW00CAoA==}
+    engines: {node: '>=8.3.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: ^5.0.2
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
         optional: true
 
   yallist@3.1.1:
@@ -995,6 +1036,10 @@ snapshots:
       '@ifc-lite/ifcx': 2.3.7
       '@ifc-lite/wasm': 1.19.2
 
+  '@ifc-lite/pointcloud@0.11.0':
+    dependencies:
+      laz-perf: 0.0.7
+
   '@ifc-lite/pointcloud@0.7.2':
     dependencies:
       laz-perf: 0.0.7
@@ -1167,7 +1212,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  atob@2.1.2: {}
+
   baseline-browser-mapping@2.11.27: {}
+
+  browser-or-node@1.3.0: {}
 
   browserslist@4.29.3:
     dependencies:
@@ -1227,6 +1276,8 @@ snapshots:
   fdir@6.5.0(picomatch@4.0.7):
     optionalDependencies:
       picomatch: 4.0.7
+
+  fetch-blob@2.1.2: {}
 
   fsevents@2.3.3:
     optional: true
@@ -1328,6 +1379,17 @@ snapshots:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
 
+  trimble-connect-sdk@4.0.12:
+    dependencies:
+      atob: 2.1.2
+      browser-or-node: 1.3.0
+      fetch-blob: 2.1.2
+      ws: 7.5.13
+    transitivePeerDependencies:
+      - bufferutil
+      - domexception
+      - utf-8-validate
+
   trimble-connect-workspace-api@0.3.38: {}
 
   typescript@5.7.3: {}
@@ -1348,5 +1410,7 @@ snapshots:
       tinyglobby: 0.2.17
     optionalDependencies:
       fsevents: 2.3.3
+
+  ws@7.5.13: {}
 
   yallist@3.1.1: {}

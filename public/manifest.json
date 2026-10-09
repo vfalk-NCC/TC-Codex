@@ -3,5 +3,5 @@
   "description": "Öppna den externa 3D-editorn och arbeta med projektets modeller.",
   "url": "https://vfalk-ncc.github.io/TC-Codex/#/trimble",
   "icon": "https://vfalk-ncc.github.io/TC-Codex/icon.svg",
-  "extensionType": ["project"]
+  "extensionType": ["project", "3dviewer"]
 }
