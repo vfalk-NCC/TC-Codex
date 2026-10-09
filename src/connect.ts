@@ -166,5 +166,5 @@ export function isConnectFolder(entry: ConnectEntry): entry is ConnectFolder {
 
 export function isSupportedConnectModel(entry: ConnectEntry) {
   const extension = entry.name.split('.').pop()?.toLowerCase();
-  return ['ifc', 'dxf', 'las', 'laz', 'ply', 'e57', 'copc', 'pcd', 'pts', 'xyz'].includes(extension || '');
+  return ['ifc', 'dxf', 'glb', 'gltf', 'zip', 'las', 'laz', 'ply', 'e57', 'copc', 'pcd', 'pts', 'xyz'].includes(extension || '');
 }

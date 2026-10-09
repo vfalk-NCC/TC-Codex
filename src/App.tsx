@@ -1,20 +1,25 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import {
   ArrowDownToLine, ArrowLeft, ArrowRight, Box, Check, ChevronDown, ChevronRight,
   CircleHelp, Cloud, Command, Cuboid, FileBox, FileImage, FilePlus2, Folder,
   FolderOpen, Grid2X2, HardDrive, Layers3, Link2, ListFilter, Maximize2,
   MoreHorizontal, MousePointer2, PanelLeftClose, PanelRightClose, Plus, Search,
-  Settings2, Share2, SlidersHorizontal, Sparkles, Upload, X,
+  Settings2, Share2, SlidersHorizontal, Sparkles, Upload, X, Eye, EyeOff,
+  Ruler, Scissors, ExternalLink, KeyRound, Download,
 } from 'lucide-react';
-import { IfcParser } from '@ifc-lite/parser';
+import { IfcParser, extractPropertiesOnDemand, extractQuantitiesOnDemand, extractEntityAttributesOnDemand, type IfcDataStore } from '@ifc-lite/parser';
 import { GeometryProcessor } from '@ifc-lite/geometry';
 import { Renderer } from '@ifc-lite/renderer';
 import { createDecodeWorkerSource, LazStreamingSource } from '@ifc-lite/pointcloud';
 import { ConnectFiles, isConnectFolder, isSupportedConnectModel, type ConnectEntry, type ConnectFolder } from './connect';
 import DxfParser from 'dxf-parser';
 import * as WorkspaceAPI from 'trimble-connect-workspace-api';
+import { unzipSync } from 'fflate';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-type LocalModel = { name: string; size: string; kind: 'IFC' | 'DXF' | 'Punktmoln'; entities?: number; file?: File };
+type LocalModel = { name: string; size: string; kind: 'IFC' | 'DXF' | 'Punktmoln' | 'GLTF'; entities?: number; file?: File };
 
 const starterModels: LocalModel[] = [
   { name: 'Exempelmodell.ifc', size: '84,2 MB', kind: 'IFC', entities: 18462 },
@@ -28,10 +33,125 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024).toFixed(0)} KB`;
 }
 
+function GltfViewport({ file, onStatus }: { file: File; onStatus: (message: string) => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    let disposed = false;
+    const urls: string[] = [];
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#121612');
+    scene.add(new THREE.HemisphereLight(0xe8f1dc, 0x354138, 2.1));
+    const key = new THREE.DirectionalLight(0xffffff, 2.5); key.position.set(5, 8, 6); scene.add(key);
+    const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 1e8); camera.position.set(5, 4, 7);
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    const controls = new OrbitControls(camera, canvas); controls.enableDamping = true;
+    const grid = new THREE.GridHelper(20, 40, 0x71806b, 0x333c33); grid.position.y = -0.01; scene.add(grid);
+    const resize = () => { const rect = canvas.getBoundingClientRect(); renderer.setSize(rect.width, rect.height, false); camera.aspect = Math.max(.01, rect.width / Math.max(1, rect.height)); camera.updateProjectionMatrix(); };
+    const observer = new ResizeObserver(resize); observer.observe(canvas); resize();
+    let frame = 0;
+    const animate = () => { if (disposed) return; controls.update(); renderer.render(scene, camera); frame = requestAnimationFrame(animate); };
+    animate();
+    const load = async () => {
+      try {
+        const loader = new GLTFLoader();
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        let input: ArrayBuffer | string = await file.arrayBuffer();
+        if (ext === 'zip') {
+          const archive = unzipSync(new Uint8Array(input as ArrayBuffer));
+          const gltfPath = Object.keys(archive).find((path) => path.toLowerCase().endsWith('.gltf'));
+          if (!gltfPath) throw new Error('ZIP-arkivet innehåller ingen .gltf-fil.');
+          const json = JSON.parse(new TextDecoder().decode(archive[gltfPath]));
+          const base = gltfPath.includes('/') ? gltfPath.slice(0, gltfPath.lastIndexOf('/') + 1) : '';
+          for (const buffer of [...(json.buffers || []), ...(json.images || [])]) {
+            const uri = buffer.uri as string | undefined;
+            if (!uri || uri.startsWith('data:') || /^https?:/i.test(uri)) continue;
+            const path = decodeURIComponent(`${base}${uri}`).replace(/\\/g, '/');
+            const bytes = archive[path] || archive[path.replace(/^\.\//, '')];
+            if (!bytes) continue;
+            const type = /\.png$/i.test(path) ? 'image/png' : /\.jpe?g$/i.test(path) ? 'image/jpeg' : 'application/octet-stream';
+            const url = URL.createObjectURL(new Blob([bytes], { type })); urls.push(url); buffer.uri = url;
+          }
+          input = JSON.stringify(json);
+        }
+        loader.parse(input, '', (gltf) => {
+          if (disposed) return;
+          const model = gltf.scene; scene.add(model);
+          const bounds = new THREE.Box3().setFromObject(model);
+          const size = bounds.getSize(new THREE.Vector3()); const center = bounds.getCenter(new THREE.Vector3());
+          model.position.sub(center);
+          const radius = Math.max(size.x, size.y, size.z, 1);
+          camera.position.set(radius * 1.8, radius * 1.35, radius * 1.8); camera.near = radius / 1000; camera.far = radius * 100; camera.updateProjectionMatrix();
+          controls.target.set(0, 0, 0); controls.minDistance = radius * .01; controls.maxDistance = radius * 40; controls.update();
+          onStatus(`${file.name} · glTF-modell inläst`);
+        }, (error) => { if (!disposed) onStatus(`Modellen kunde inte läsas: ${error.message || 'ogiltigt glTF-format'}`); });
+      } catch (error) { if (!disposed) onStatus(error instanceof Error ? error.message : 'Modellen kunde inte läsas.'); }
+    };
+    void load();
+    return () => { disposed = true; cancelAnimationFrame(frame); observer.disconnect(); controls.dispose(); renderer.dispose(); urls.forEach(URL.revokeObjectURL); };
+  }, [file, onStatus]);
+  return <canvas ref={canvasRef} className="ifc-canvas" aria-label="glTF 3D-modell" />;
+}
+
+type SketchfabModel = { uid: string; name: string; viewerUrl: string; isDownloadable: boolean; user?: { displayName?: string }; license?: { label?: string }; thumbnails?: { images?: Array<{ url?: string }> } };
+
+function SketchfabDialog({ close, onImport, onNotice }: { close: () => void; onImport: (file: File) => void; onNotice: (message: string) => void }) {
+  const [token, setToken] = useState('');
+  const [query, setQuery] = useState('');
+  const [models, setModels] = useState<SketchfabModel[]>([]);
+  const [status, setStatus] = useState('Sök bland nedladdningsbara Sketchfab-modeller.');
+  const [busy, setBusy] = useState(false);
+  const request = async (url: string, accessToken: string) => {
+    let response = await fetch(url, { headers: { Authorization: `Token ${accessToken}` } });
+    if (response.status === 401 || response.status === 403) response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    return response;
+  };
+  const search = async () => {
+    if (!query.trim()) { setStatus('Skriv vad du söker efter.'); return; }
+    setBusy(true); setStatus('Söker på Sketchfab…');
+    try {
+      const params = new URLSearchParams({ type: 'models', downloadable: 'true', count: '18', q: query.trim() });
+      const response = token.trim() ? await request(`https://api.sketchfab.com/v3/search?${params}`, token.trim()) : await fetch(`https://api.sketchfab.com/v3/search?${params}`);
+      if (!response.ok) throw new Error(response.status === 401 ? 'Token nekades. Kontrollera Sketchfab-token.' : `Sketchfab svarade ${response.status}.`);
+      const data = await response.json(); setModels(data.results || []); setStatus(`${(data.results || []).length} nedladdningsbara modeller hittades.`);
+    } catch (error) { setModels([]); setStatus(error instanceof Error ? error.message : 'Sökningen misslyckades.'); }
+    finally { setBusy(false); }
+  };
+  const download = async (model: SketchfabModel) => {
+    if (!token.trim()) { setStatus('Ange en Sketchfab-token för att hämta modeller.'); return; }
+    setBusy(true); setStatus(`Begär nedladdning av ${model.name}…`);
+    try {
+      const response = await request(`https://api.sketchfab.com/v3/models/${encodeURIComponent(model.uid)}/download`, token.trim());
+      if (response.status === 401 || response.status === 403) throw new Error('Sketchfab kräver en OAuth access token för nedladdning. En personlig API-token kan räcka för sökning men inte för Download API.');
+      if (!response.ok) throw new Error(`Nedladdningsbegäran misslyckades (${response.status}).`);
+      const links = await response.json();
+      if (!links.gltf?.url) throw new Error('Modellen saknar en nedladdningsbar glTF-fil.');
+      setStatus('Hämtar glTF-arkiv…');
+      const archive = await fetch(links.gltf.url);
+      if (!archive.ok) throw new Error('Sketchfab-arkivet kunde inte hämtas.');
+      const file = new File([await archive.blob()], `${model.name.replace(/[\\/:*?"<>|]/g, '_')}.zip`, { type: 'application/zip' });
+      onImport(file); close(); onNotice(`Importerade “${model.name}” från Sketchfab. Kontrollera modellens licens på Sketchfab.`);
+    } catch (error) { setStatus(error instanceof Error ? error.message : 'Nedladdningen misslyckades.'); }
+    finally { setBusy(false); }
+  };
+  return <div className="modal-scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}><section className="files-modal asset-modal">
+    <button className="modal-close" onClick={close}><X size={16}/></button><span className="modal-mark"><Cuboid size={18}/></span><span className="panel-eyebrow">MODELLBIBLIOTEK</span><h2>Hämta från Sketchfab</h2><p>Sök nedladdningsbara modeller och läs in dem direkt i 3D-vyn. Token används bara i den här fliken.</p>
+    <label className="asset-label"><KeyRound size={14}/> API / OAuth-token<input type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="Klistra in Sketchfab-token" autoComplete="off"/></label>
+    <div className="asset-search"><input value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && void search()} placeholder="Sök modell, t.ex. pump eller stol"/><button disabled={busy} onClick={() => void search()}><Search size={15}/></button></div>
+    <div className="asset-status">{busy && <span className="spinner"/>}{status}</div>
+    <div className="asset-results">{models.map((model) => <article className="asset-result" key={model.uid}><img src={model.thumbnails?.images?.[0]?.url || ''} alt=""/><div><b>{model.name}</b><small>{model.user?.displayName || 'Sketchfab'} · {model.license?.label || 'Licens på modellens sida'}</small></div><button disabled={busy || !model.isDownloadable} title="Hämta glTF" onClick={() => void download(model)}><Download size={15}/></button></article>)}</div>
+    <div className="modal-note"><span className="live-dot"/>Download API kräver inloggning och en OAuth access token. Granska licens och attribution innan användning.</div>
+  </section></div>;
+}
+
 function fileKind(file: File): LocalModel['kind'] | null {
   const ext = file.name.split('.').pop()?.toLowerCase();
   if (ext === 'ifc') return 'IFC';
   if (ext === 'dxf') return 'DXF';
+  if (['glb', 'gltf', 'zip'].includes(ext || '')) return 'GLTF';
   if (['las', 'laz', 'ply', 'e57', 'copc', 'pcd', 'pts', 'xyz'].includes(ext || '')) return 'Punktmoln';
   return null;
 }
@@ -128,7 +248,18 @@ export default function App() {
   const [showConnect, setShowConnect] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showFiles, setShowFiles] = useState(false);
+  const [showSketchfab, setShowSketchfab] = useState(false);
   const [showProperties, setShowProperties] = useState(true);
+  const [tool, setTool] = useState<'select' | 'measure' | 'section'>('select');
+  const [ifcStore, setIfcStore] = useState<IfcDataStore | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selectedProperties, setSelectedProperties] = useState<Array<{ name: string; value: string }>>([]);
+  const [hiddenIds, setHiddenIds] = useState<Set<number>>(new Set());
+  const [isolatedIds, setIsolatedIds] = useState<Set<number> | null>(null);
+  const [sectionOn, setSectionOn] = useState(false);
+  const [sectionPosition, setSectionPosition] = useState(0.5);
+  const [measurePoint, setMeasurePoint] = useState<{ x: number; y: number; z: number } | null>(null);
+  const [measurement, setMeasurement] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<'modell' | 'projekt'>('modell');
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState('');
@@ -141,8 +272,14 @@ export default function App() {
   const parserRef = useRef<IfcParser | null>(null);
   const geometryRef = useRef<GeometryProcessor | null>(null);
   const rendererRef = useRef<Renderer | null>(null);
+  const rendererCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const pointCloudGeneration = useRef(0);
+  const renderOptionsRef = useRef<{ hiddenIds: Set<number>; isolatedIds: Set<number> | null; selectedIds: Set<number>; sectionPlane?: { axis: 'down'; position: number; enabled: boolean } }>({ hiddenIds: new Set(), isolatedIds: null, selectedIds: new Set() });
+
+  useEffect(() => {
+    renderOptionsRef.current = { hiddenIds, isolatedIds, selectedIds: selectedId ? new Set([selectedId]) : new Set(), ...(sectionOn ? { sectionPlane: { axis: 'down', position: sectionPosition, enabled: true } } : {}) };
+  }, [hiddenIds, isolatedIds, selectedId, sectionOn, sectionPosition]);
 
   const enterEditor = useCallback(() => { location.hash = '/editor'; setRoute('editor'); }, []);
   const goHome = useCallback(() => { location.hash = ''; setRoute('home'); }, []);
@@ -162,14 +299,23 @@ export default function App() {
   }, [route]);
 
   const initializeIfc = useCallback(async (canvas: HTMLCanvasElement) => {
-    if (rendererRef.current) return;
+    if (rendererRef.current && rendererCanvasRef.current === canvas) return;
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    if (rendererRef.current) rendererRef.current.destroy();
+    rendererRef.current = null;
     const renderer = new Renderer(canvas);
     const geometry = new GeometryProcessor();
     await Promise.all([renderer.init(), geometry.init()]);
-    rendererRef.current = renderer; geometryRef.current = geometry; parserRef.current = new IfcParser();
-    const loop = () => { renderer.render(); animationRef.current = requestAnimationFrame(loop); };
+    rendererRef.current = renderer; rendererCanvasRef.current = canvas; geometryRef.current = geometry; parserRef.current = new IfcParser();
+    const loop = () => { renderer.render(renderOptionsRef.current); animationRef.current = requestAnimationFrame(loop); };
     loop();
   }, []);
+
+  useEffect(() => {
+    if (route === 'editor' || !rendererRef.current) return;
+    if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    rendererRef.current.destroy(); rendererRef.current = null; rendererCanvasRef.current = null;
+  }, [route]);
 
   useEffect(() => {
     if (route !== 'editor' || !canvasRef.current || !active?.file || active.kind !== 'IFC') return;
@@ -182,6 +328,7 @@ export default function App() {
         const buffer = await active.file!.arrayBuffer();
         const store = await parserRef.current!.parseColumnar(buffer, { onProgress: ({ phase, percent }) => setNotice(`${phase} · ${Math.round(percent)}%`) });
         if (cancelled) return;
+        setIfcStore(store); setHiddenIds(new Set()); setIsolatedIds(null); setSelectedId(null); setSelectedProperties([]);
         const result = await geometryRef.current!.process(new Uint8Array(buffer));
         if (cancelled) return;
         rendererRef.current!.loadGeometry(result); rendererRef.current!.fitToView();
@@ -249,20 +396,61 @@ export default function App() {
 
   const acceptFile = (file: File) => {
     const kind = fileKind(file);
-    if (!kind) { setNotice('Välj en IFC-, DXF-, LAS-, LAZ-, PLY-, E57- eller COPC-fil.'); return; }
+    if (!kind) { setNotice('Välj IFC, DXF, glTF/GLB/ZIP eller en punktmolnsfil.'); return; }
     const item: LocalModel = { name: file.name, size: formatBytes(file.size), kind, file };
     setModels((current) => [item, ...current.filter((m) => m.name !== item.name)]);
-    setActive(item); setShowImport(false); setRoute('editor'); location.hash = '/editor';
+    setActive(item); setSelectedId(null); setSelectedProperties([]); setMeasurePoint(null); setMeasurement(null); setHiddenIds(new Set()); setIsolatedIds(null); setShowImport(false); setRoute('editor'); location.hash = '/editor';
     if (kind === 'Punktmoln') setNotice('Punktmolnsfilen har lagts till.');
   };
 
   const openModel = (model: LocalModel) => {
-    setActive(model); setEntityTotal(model.entities ?? null); setShowFiles(false); setRoute('editor');
+    setActive(model); setEntityTotal(model.entities ?? null); setSelectedId(null); setSelectedProperties([]); setMeasurePoint(null); setMeasurement(null); setHiddenIds(new Set()); setIsolatedIds(null); setShowFiles(false); setRoute('editor');
     location.hash = '/editor';
     if (model.kind === 'Punktmoln' && !model.file) setNotice('Välj en lokal punktmolnsfil för att börja.');
     if (model.kind === 'IFC' && !model.file) setNotice('Exempelfilen finns i modellistan. Importera en lokal IFC för att visa geometrin.');
     if (model.kind === 'DXF' && !model.file) setNotice('Importera en lokal DXF-fil för att visa ritningsgeometrin.');
   };
+
+  const selectViewport = async (event: MouseEvent<HTMLCanvasElement>) => {
+    if (active?.kind !== 'IFC' || !rendererRef.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const picked = await rendererRef.current.pick(event.clientX - rect.left, event.clientY - rect.top, { hiddenIds, isolatedIds });
+    if (tool === 'measure') {
+      if (!picked?.worldXYZ) { setNotice('Klicka på en synlig IFC-yta för att mäta.'); return; }
+      const point = picked.worldXYZ;
+      if (!measurePoint) { setMeasurePoint(point); setMeasurement(null); setNotice('Första mätpunkten vald. Välj nästa punkt.'); }
+      else {
+        const distance = Math.hypot(point.x - measurePoint.x, point.y - measurePoint.y, point.z - measurePoint.z);
+        setMeasurement(distance); setMeasurePoint(null); setNotice(`Avstånd: ${distance.toFixed(3)} m`);
+      }
+      return;
+    }
+    const id = picked?.expressId ?? null;
+    setSelectedId(id);
+    if (!id || !ifcStore) { setSelectedProperties([]); setNotice('Inget IFC-objekt valt.'); return; }
+    const entity = ifcStore.entityIndex.byId.get(id);
+    const attrs = extractEntityAttributesOnDemand(ifcStore, id);
+    const rows = [
+      { name: 'IFC-klass', value: entity?.type || 'IFC-objekt' },
+      { name: 'Express ID', value: `#${id}` },
+      ...(attrs.globalId ? [{ name: 'GlobalId', value: attrs.globalId }] : []),
+      ...(attrs.name ? [{ name: 'Namn', value: attrs.name }] : []),
+      ...(attrs.objectType ? [{ name: 'Objekttyp', value: attrs.objectType }] : []),
+      ...extractPropertiesOnDemand(ifcStore, id).flatMap((set) => set.properties.map((property) => ({ name: `${set.name} · ${property.name}`, value: String(property.value ?? property.values?.join(', ') ?? '—') }))),
+      ...extractQuantitiesOnDemand(ifcStore, id).flatMap((set) => set.quantities.map((quantity) => ({ name: `${set.name} · ${quantity.name}`, value: String(quantity.value) }))),
+    ];
+    setSelectedProperties(rows.slice(0, 18)); setNotice(`${entity?.type || 'IFC-objekt'} · #${id} markerad`);
+  };
+
+  const hideSelected = () => {
+    if (!selectedId) { setNotice('Markera ett IFC-objekt först.'); return; }
+    setHiddenIds((ids) => new Set(ids).add(selectedId)); setSelectedId(null); setSelectedProperties([]); setNotice(`Objekt #${selectedId} dolt.`);
+  };
+  const isolateSelected = () => {
+    if (!selectedId) { setNotice('Markera ett IFC-objekt först.'); return; }
+    setIsolatedIds(new Set([selectedId])); setNotice(`Objekt #${selectedId} isolerat.`);
+  };
+  const resetVisibility = () => { setHiddenIds(new Set()); setIsolatedIds(null); setNotice('Alla IFC-objekt visas igen.'); };
 
   const exportModel = () => {
     if (!active?.file) { setNotice('Öppna en lokal modell för att exportera eller synka den till projektet.'); return; }
@@ -293,28 +481,29 @@ export default function App() {
       <div className="launch-visual"><div className="visual-top"><span className="live-dot" /> MODELLSTUDIO <span className="visual-project">EXEMPEL · IFC + DXF</span></div><div className="launch-blueprint"><div className="blueprint-grid"/><svg viewBox="0 0 540 330"><path d="m84 174 196-96 170 61-198 98z" fill="#27312a" stroke="#d6f36a" strokeWidth="1.2"/><path d="m84 174 168 63v69L84 242z" fill="#202c27" stroke="#738176"/><path d="m252 237 198-98v69l-198 98z" fill="#45554d" stroke="#c6d1bb"/><path d="m112 173 49-24v75l-49-19zm74-35 47-23v88l-47-18zm108 94 42-21v58l-42 21zm70-35 42-20v58l-42 20z" fill="#182220" stroke="#a4b39f"/><path d="m84 255 168 64 198-98" fill="none" stroke="#d6f36a" strokeDasharray="4 5" opacity=".6"/><circle cx="444" cy="95" r="3" fill="#ff875d"/><path d="M444 95v35" stroke="#ff875d" strokeDasharray="2 3"/></svg><div className="floating-label label-ifc"><Cuboid size={14}/> Exempelmodell <b>IFC</b></div><div className="floating-label label-dxf"><FileImage size={14}/> Exempelritning <b>DXF</b></div><div className="visual-scale">X&nbsp; 4 320&nbsp; Y&nbsp; 1 820&nbsp; Z&nbsp; 1 260 <span>mm</span></div></div><div className="visual-bottom"><span>ARBETSFLÖDE</span><span className="workflow">Connect <ArrowRight size={13}/> Studio <ArrowRight size={13}/> Tillbaka till projektet</span></div></div>
       <div className="launch-lower"><div><span className="section-kicker">EXEMPEL I ARBETSFLÖDET</span><div className="recent-row"><span className="file-chip ifc-chip">IFC</span><div><b>Exempelmodell.ifc</b><span>Förhandsvisning · 18 462 objekt</span></div><button onClick={() => openModel(starterModels[0])}>Öppna <ArrowRight size={14}/></button></div></div><div className="open-files-card"><span className="file-plus"><FilePlus2 size={19}/></span><span><b>Börja med en lokal fil</b><small>IFC · DXF · punktmoln</small></span><button onClick={() => inputRef.current?.click()}><Plus size={16}/></button></div></div>
     </main><footer className="launch-footer"><span>TC CODEX <span className="footer-sep">/</span> EXTERN MODELLSTUDIO</span><span>Utvecklas för projektarbete i Trimble Connect</span><button onClick={() => setShowConnect(true)}><CircleHelp size={14}/> Om kopplingen</button></footer>
-    <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
+    <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.glb,.gltf,.zip,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
     {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}
   </div>;
 
   return <div className="studio-shell">
     <header className="studio-top"><button className="brand compact" onClick={goHome}><span className="brand-mark">T<span /></span><span className="brand-name">TC <b>Codex</b></span></button><span className="top-divider"/><button className="project-select" onClick={() => setShowFiles(true)}><span className="project-glyph">N</span><span><b>{connectProject?.name || 'NSV · DP1, DP2 & DP3'}</b><small>{connectToken ? 'Trimble Connect-session aktiv' : 'Trimble Connect-projekt'}</small></span><ChevronDown size={14}/></button><div className="top-spacer"/><span className="save-state"><span className="live-dot"/> {active?.file ? 'Sparad lokalt' : 'Ingen ändringar'}</span><button className="icon-button" title="Dela" onClick={() => setNotice('Delning aktiveras när en Trimble Connect-session är ansluten.')}><Share2 size={16}/></button><button className="avatar">VF</button></header>
-    <nav className="studio-tools"><div className="tool-group"><button className="tool-button" onClick={goHome}><ArrowLeft size={16}/><span>Tillbaka</span></button><span className="tool-separator"/><button className="tool-button selected"><MousePointer2 size={16}/><span>Markera</span></button><button className="tool-button" onClick={() => setNotice('Mätverktyget läggs till efter filkopplingen.')}><SlidersHorizontal size={16}/><span>Mät</span></button><button className="tool-button" onClick={() => setNotice('Snittverktyget kommer i nästa arbetssteg.')}><Layers3 size={16}/><span>Snitt</span></button></div><div className="tool-group"><button className="tool-button" onClick={() => setShowProperties((s) => !s)}><PanelRightClose size={16}/><span>Egenskaper</span></button><span className="tool-separator"/><button className="tool-button" onClick={() => active?.file ? setShowFiles(true) : setShowImport(true)}><Upload size={16}/><span>Spara till Connect</span></button><button className="tool-button more" onClick={() => setNotice('Fler verktyg kommer snart.')}><MoreHorizontal size={17}/></button></div></nav>
+    <nav className="studio-tools"><div className="tool-group"><button className="tool-button" onClick={goHome}><ArrowLeft size={16}/><span>Tillbaka</span></button><span className="tool-separator"/><button className={`tool-button ${tool === 'select' ? 'selected' : ''}`} onClick={() => { setTool('select'); setMeasurePoint(null); }}><MousePointer2 size={16}/><span>Markera</span></button><button className={`tool-button ${tool === 'measure' ? 'selected' : ''}`} onClick={() => { setTool('measure'); setMeasurePoint(null); setMeasurement(null); setNotice('Klicka två punkter i IFC-modellen för att mäta.'); }}><Ruler size={16}/><span>Mät</span></button><button className={`tool-button ${tool === 'section' ? 'selected' : ''}`} onClick={() => { setTool('section'); setSectionOn((value) => !value); setNotice(sectionOn ? 'Snittplanet avstängt.' : 'Snittplanet aktivt. Justera läget i modellvyn.'); }}><Scissors size={16}/><span>Snitt</span></button></div><div className="tool-group"><button className="tool-button" onClick={() => setShowProperties((s) => !s)}><PanelRightClose size={16}/><span>Egenskaper</span></button><span className="tool-separator"/><button className="tool-button" onClick={() => active?.file ? setShowFiles(true) : setShowImport(true)}><Upload size={16}/><span>Spara till Connect</span></button><button className="tool-button more" title="Hämta från Sketchfab" onClick={() => setShowSketchfab(true)}><Cuboid size={17}/></button></div></nav>
     <div className="studio-layout">
       <aside className="left-rail"><button className="rail-active" title="Modeller"><Box size={17}/></button><button title="Trimble Connect-filer" onClick={() => setShowFiles(true)}><Folder size={17}/></button><button title="Lager" onClick={() => setNotice('Lager kopplas till modellen när IFC-filen är inläst.')}><Layers3 size={17}/></button><div className="rail-bottom"><button title="Inställningar" onClick={() => setNotice('Inställningar kommer snart.')}><Settings2 size={17}/></button><button title="Hjälp"><CircleHelp size={17}/></button></div></aside>
-      <aside className="model-panel"><div className="panel-heading"><div><span className="panel-eyebrow">ARBETSPLATS</span><h2>Modellfiler</h2></div><button className="mini-icon" title="Lägg till fil" onClick={() => inputRef.current?.click()}><Plus size={16}/></button></div><button className="connect-folder" onClick={() => setShowFiles(true)}><span className="folder-square"><Cloud size={16}/></span><span><b>Trimble Connect</b><small>{connectProject?.name || 'NSV · DP1, DP2 & DP3'}</small></span><ChevronRight size={15}/></button><div className="search-box"><Search size={14}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Sök modell eller ritning"/><kbd>⌘ K</kbd></div><div className="list-heading"><span>ARBETSFILER <b>{visibleModels.length}</b></span><button onClick={() => setShowConnect(true)}><ListFilter size={14}/></button></div><div className="model-list">{visibleModels.map((model, i) => <button key={model.name} onClick={() => openModel(model)} className={`model-row ${active?.name === model.name ? 'model-active' : ''}`}><span className={`file-chip ${model.kind === 'IFC' ? 'ifc-chip' : model.kind === 'DXF' ? 'dxf-chip' : 'cloud-chip'}`}>{model.kind === 'Punktmoln' ? 'LAS' : model.kind}</span><span className="model-info"><b>{model.name}</b><small>{model.size} <i>·</i> {model.entities ? `${model.entities.toLocaleString('sv-SE')} objekt` : 'Connect-fil'}</small></span><span className="row-more"><MoreHorizontal size={15}/></span></button>)}</div><button className="add-model-button" onClick={() => inputRef.current?.click()}><Plus size={15}/> Lägg till lokal fil</button><div className="panel-footer"><span className="storage-icon"><HardDrive size={14}/></span><span><b>Lokala filer</b><small>Bara dina öppna filer</small></span><button onClick={() => setShowConnect(true)}><Link2 size={14}/></button></div></aside>
+      <aside className="model-panel"><div className="panel-heading"><div><span className="panel-eyebrow">ARBETSPLATS</span><h2>Modellfiler</h2></div><button className="mini-icon" title="Lägg till fil" onClick={() => inputRef.current?.click()}><Plus size={16}/></button></div><button className="connect-folder" onClick={() => setShowFiles(true)}><span className="folder-square"><Cloud size={16}/></span><span><b>Trimble Connect</b><small>{connectProject?.name || 'NSV · DP1, DP2 & DP3'}</small></span><ChevronRight size={15}/></button><div className="search-box"><Search size={14}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Sök modell eller ritning"/><kbd>⌘ K</kbd></div><div className="list-heading"><span>ARBETSFILER <b>{visibleModels.length}</b></span><button onClick={() => setShowConnect(true)}><ListFilter size={14}/></button></div><div className="model-list">{visibleModels.map((model, i) => <button key={model.name} onClick={() => openModel(model)} className={`model-row ${active?.name === model.name ? 'model-active' : ''}`}><span className={`file-chip ${model.kind === 'IFC' ? 'ifc-chip' : model.kind === 'DXF' ? 'dxf-chip' : 'cloud-chip'}`}>{model.kind === 'Punktmoln' ? 'LAS' : model.kind}</span><span className="model-info"><b>{model.name}</b><small>{model.size} <i>·</i> {model.entities ? `${model.entities.toLocaleString('sv-SE')} objekt` : 'Connect-fil'}</small></span><span className="row-more"><MoreHorizontal size={15}/></span></button>)}</div><button className="add-model-button" onClick={() => inputRef.current?.click()}><Plus size={15}/> Lägg till lokal fil</button><button className="library-button" onClick={() => setShowSketchfab(true)}><Cuboid size={14}/> Sök Sketchfab</button><button className="library-button" onClick={() => { window.open('https://3dwarehouse.sketchup.com/', '_blank', 'noopener,noreferrer'); setNotice('3D Warehouse öppnades i en ny flik. Ladda ned en kompatibel IFC- eller glTF-modell för import.'); }}><ExternalLink size={14}/> Öppna 3D Warehouse</button><div className="panel-footer"><span className="storage-icon"><HardDrive size={14}/></span><span><b>Lokala filer</b><small>Bara dina öppna filer</small></span><button onClick={() => setShowFiles(true)}><Link2 size={14}/></button></div></aside>
       <main className="editor-main"><div className="editor-header"><div className="breadcrumb"><span>NSV · DP1, DP2 & DP3</span><ChevronRight size={13}/><b>{active?.name || 'Modellvy'}</b></div><div className="editor-header-actions"><span className="format-pill"><span className={active?.kind === 'DXF' ? 'format-orange' : ''}/>{active?.kind || '3D'}</span><button className="mini-icon" onClick={() => setNotice('Versioner hämtas från Trimble Connect när anslutningen är aktiv.')} title="Versionshistorik"><Command size={15}/></button><button className="mini-icon" onClick={() => setNotice('Fler vyer kommer snart.')} title="Vyinställningar"><Grid2X2 size={15}/></button></div></div><div className="editor-tabs"><button className={activeTab === 'modell' ? 'tab-active' : ''} onClick={() => setActiveTab('modell')}>Modell <span>01</span></button><button className={activeTab === 'projekt' ? 'tab-active' : ''} onClick={() => { setActiveTab('projekt'); setShowFiles(true); }}>Connect <span><Cloud size={12}/></span></button><button className="tab-add" onClick={() => setShowImport(true)}><Plus size={14}/></button></div>
         <div className="viewport-wrap" onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files[0]) acceptFile(e.dataTransfer.files[0]); }}>
-          {(active?.kind === 'IFC' || active?.kind === 'Punktmoln') && active.file ? <canvas ref={canvasRef} className="ifc-canvas" aria-label={active.kind === 'IFC' ? 'IFC 3D-modell' : 'Punktmoln'} /> : <Drawing active={active} onFit={() => { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else if (canvasRef.current) renderFrame(canvasRef.current); setNotice('Vyn anpassad efter modellen.'); }}/ >}
+          {active?.kind === 'GLTF' && active.file ? <GltfViewport file={active.file} onStatus={setNotice}/> : (active?.kind === 'IFC' || active?.kind === 'Punktmoln') && active.file ? <canvas ref={canvasRef} onClick={(event) => void selectViewport(event)} className={`ifc-canvas ${tool === 'measure' ? 'measure-cursor' : ''}`} aria-label={active.kind === 'IFC' ? 'IFC 3D-modell' : 'Punktmoln'} /> : <Drawing active={active} onFit={() => { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else if (canvasRef.current) renderFrame(canvasRef.current); setNotice('Vyn anpassad efter modellen.'); }}/ >}
           {active?.kind !== 'DXF' && (!active?.file || (active.kind === 'Punktmoln' && !active.file)) && <div className="scene-model" aria-hidden="true"><svg viewBox="0 0 900 500"><defs><linearGradient id="sfa" x2="1" y2="1"><stop stopColor="#cfdbc5"/><stop offset="1" stopColor="#9aa897"/></linearGradient></defs><ellipse cx="456" cy="407" rx="282" ry="37" fill="#000" opacity=".36"/><path d="m205 213 267-125 221 79-267 125z" fill="#59665d" stroke="#bac9b4"/><path d="m205 213 221 79v93l-221-80z" fill="#314139" stroke="#a8b7a5"/><path d="m426 292 267-125v94L426 385z" fill="url(#sfa)" stroke="#e3ead7"/><path d="m244 210 45-21v100l-45-16zm70-33 45-21v127l-45-16zm158 121 42-20v62l-42 20zm66-31 43-20v62l-43 20zm67-32 42-20v62l-42 20z" fill="#192624" stroke="#89998c"/><path d="m426 292 267-125M205 213l267-125" stroke="#f0f4e5" opacity=".56"/></svg></div>}
-          <div className="viewport-hud"><span className="hud-live"><i/>{active?.file ? 'LOKAL MODELL' : 'FÖRHANDSVISNING'}</span><span className="hud-coords">X 0,00 &nbsp; Y 0,00 &nbsp; Z 0,00 m</span></div><div className="view-controls"><button className="viewcube">TOP</button><button onClick={() => setNotice('Perspektivvy aktiv.')}><Cuboid size={15}/></button><button onClick={() => setNotice('Objektisolering kommer snart.')}><Maximize2 size={15}/></button></div>
+          <div className="viewport-hud"><span className="hud-live"><i/>{active?.file ? 'LOKAL MODELL' : 'FÖRHANDSVISNING'}</span><span className="hud-coords">{selectedId ? `IFC #${selectedId}` : 'X 0,00  ·  Y 0,00  ·  Z 0,00 m'}</span></div><div className="view-controls"><button className="viewcube">TOP</button><button onClick={() => setNotice('Perspektivvy aktiv.')}><Cuboid size={15}/></button><button title="Återställ synlighet" onClick={resetVisibility}><Eye size={15}/></button></div>
+          {active?.kind === 'IFC' && active.file && (tool === 'section' || measurement !== null) && <div className="model-tool-popover">{tool === 'section' && <><div><Scissors size={14}/> <b>Snittplan</b><button onClick={() => setSectionOn((value) => !value)}>{sectionOn ? 'Av' : 'På'}</button></div><input aria-label="Snittplanets position" type="range" min="0" max="100" value={Math.round(sectionPosition * 100)} onChange={(e) => setSectionPosition(Number(e.target.value) / 100)}/><small>Vertikalt snitt · {Math.round(sectionPosition * 100)}%</small></>}{measurement !== null && <div><Ruler size={14}/> <b>{measurement.toFixed(3)} m</b><button onClick={() => { setMeasurement(null); setTool('measure'); }}>Ny mätning</button></div>}</div>}
           {busy && <div className="loading-banner"><span className="spinner"/>{notice || 'Laddar modell…'}</div>}
         </div><div className="statusbar"><span><span className="status-dot"/>{notice || (active?.file ? 'Modellen finns på din enhet' : 'Anslut Trimble Connect för att öppna projektfiler')}</span><span>{entityTotal ? `${entityTotal.toLocaleString('sv-SE')} entiteter` : 'METER'} <i/> ORTHO <i/> 1:100</span></div>
       </main>
-      {showProperties && <aside className="properties-panel"><div className="properties-heading"><div><span className="panel-eyebrow">INSPEKTÖR</span><h2>Detaljer</h2></div><button className="mini-icon" onClick={() => setShowProperties(false)}><PanelRightClose size={16}/></button></div><div className="properties-tabs"><button className="property-active">Egenskaper</button><button onClick={() => setNotice('Mätningar visas när en modell är vald.')}>Mätningar</button></div>{active ? <><div className="selected-object"><div className="object-icon"><Cuboid size={18}/></div><div><b>{active.name}</b><small>{active.kind === 'IFC' ? 'IFC Building Model' : active.kind === 'DXF' ? 'CAD-ritning' : 'Punktmoln'}</small></div><button className="mini-icon" onClick={() => setNotice('Objektmeny öppnas efter import.')}><MoreHorizontal size={16}/></button></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> ÖVERSIKT</button><div className="property-row"><span>Format</span><b>{active.kind}</b></div><div className="property-row"><span>Storlek</span><b>{active.size}</b></div><div className="property-row"><span>Objekt</span><b>{entityTotal?.toLocaleString('sv-SE') || active.entities?.toLocaleString('sv-SE') || '—'}</b></div><div className="property-row"><span>Koordinatsystem</span><b className="unknown-value">Ej inläst</b></div></div><div className="property-section"><button className="property-section-title"><ChevronRight size={14}/> PLATSERING</button></div><div className="property-section"><button className="property-section-title"><ChevronRight size={14}/> EGENSKAPER</button></div></> : <div className="empty-inspector"><span><Cuboid size={21}/></span><b>Välj ett objekt</b><small>Markera ett objekt i vyn för att se dess egenskaper.</small></div>}<div className="inspector-bottom"><span className="inspector-help"><Sparkles size={14}/><span><b>Modellassistent</b><small>Fråga om modellen när den är ansluten.</small></span></span><button onClick={() => setNotice('Assistenten aktiveras efter att IFC-modellen är inläst.')}><ArrowRight size={15}/></button></div></aside>}
+      {showProperties && <aside className="properties-panel"><div className="properties-heading"><div><span className="panel-eyebrow">INSPEKTÖR</span><h2>Detaljer</h2></div><button className="mini-icon" onClick={() => setShowProperties(false)}><PanelRightClose size={16}/></button></div><div className="properties-tabs"><button className="property-active">Egenskaper</button><button onClick={() => setNotice(measurement === null ? 'Välj Mät och klicka två punkter i IFC-modellen.' : `Senaste mätning: ${measurement.toFixed(3)} m`)}>Mätningar</button></div>{active ? <><div className="selected-object"><div className="object-icon"><Cuboid size={18}/></div><div><b>{selectedId ? `#${selectedId} · ${ifcStore?.entityIndex.byId.get(selectedId)?.type || 'IFC-objekt'}` : active.name}</b><small>{active.kind === 'IFC' ? 'IFC Building Model' : active.kind === 'DXF' ? 'CAD-ritning' : active.kind === 'GLTF' ? 'glTF / Sketchfab' : 'Punktmoln'}</small></div></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> ÖVERSIKT</button><div className="property-row"><span>Format</span><b>{active.kind}</b></div><div className="property-row"><span>Storlek</span><b>{active.size}</b></div><div className="property-row"><span>Objekt</span><b>{entityTotal?.toLocaleString('sv-SE') || active.entities?.toLocaleString('sv-SE') || '—'}</b></div><div className="property-row"><span>Koordinatsystem</span><b className="unknown-value">{ifcStore?.lengthUnitScale ? `IFC · ${ifcStore.lengthUnitScale} m/enhet` : 'Ej inläst'}</b></div></div>{active.kind === 'IFC' && <><div className="object-actions"><button onClick={hideSelected} disabled={!selectedId}><EyeOff size={14}/> Dölj</button><button onClick={isolateSelected} disabled={!selectedId}><Eye size={14}/> Isolera</button><button onClick={resetVisibility}><Maximize2 size={14}/> Visa alla</button></div><div className="property-section"><button className="property-section-title"><ChevronDown size={14}/> IFC-EGENSKAPER {selectedId ? `· #${selectedId}` : ''}</button>{selectedProperties.length ? selectedProperties.map((property, index) => <div className="property-row ifc-property-row" key={`${property.name}-${index}`}><span title={property.name}>{property.name}</span><b title={property.value}>{property.value}</b></div>) : <small className="ifc-empty-properties">Markera ett element i modellen för att läsa dess IFC-egenskaper och mängder.</small>}</div></>}</> : <div className="empty-inspector"><span><Cuboid size={21}/></span><b>Välj ett objekt</b><small>Markera ett objekt i vyn för att se dess egenskaper.</small></div>}<div className="inspector-bottom"><span className="inspector-help"><Sparkles size={14}/><span><b>Modellassistent</b><small>Fråga om modellen när den är ansluten.</small></span></span><button onClick={() => setNotice('Assistenten aktiveras efter att IFC-modellen är inläst.')}><ArrowRight size={15}/></button></div></aside>}
     </div>
-    <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
-    {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} projectRegion={connectProject?.region} token={connectToken} activeFile={active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}
+    <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.glb,.gltf,.zip,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
+    {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} projectRegion={connectProject?.region} token={connectToken} activeFile={active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}{showSketchfab && <SketchfabDialog close={() => setShowSketchfab(false)} onImport={acceptFile} onNotice={setNotice} />}
     <div className="toast-host">{notice && <button className="toast" onClick={() => setNotice('')}><span className="toast-icon"><Check size={14}/></span>{notice}<X size={14}/></button>}</div>
   </div>;
 }
