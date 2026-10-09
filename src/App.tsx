@@ -346,7 +346,7 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
         const connection = await WorkspaceAPI.connect(window.parent, onEvent, 30000);
         if (!alive) return;
         setApi(connection);
-        const current = await connection.project.getCurrentProject();
+        const current = await connection.project.getProject();
         if (!alive) return;
         const rawProject = current as any;
         const projectInfo = {
