@@ -342,7 +342,8 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
     window.addEventListener('message', onMessage);
     void (async () => {
       try {
-        const connection = await WorkspaceAPI.connect(window.parent, onEvent, 5000);
+        // Workspace API handshakes can take longer while the Connect viewer initializes.
+        const connection = await WorkspaceAPI.connect(window.parent, onEvent, 15000);
         if (!alive) return;
         setApi(connection);
         const current = await connection.project.getCurrentProject();
@@ -351,13 +352,20 @@ function TrimbleLauncher({ onOpenLocal }: { onOpenLocal: () => void }) {
         const projectInfo = { id: rawProject?.id ?? rawProject?.projectId, name: rawProject?.name ?? rawProject?.projectName };
         projectRef.current = projectInfo;
         setProject(projectInfo); setStatus(projectInfo.name ? `Ansluten till ${projectInfo.name}` : 'Trimble Connect är redo.');
-      } catch {
-        if (alive) setStatus('Öppna den här panelen från ett Trimble Connect-projekt.');
+      } catch (reason) {
+        if (alive) {
+          const detail = reason instanceof Error ? ` (${reason.message})` : '';
+          setStatus(`Workspace API kunde inte ansluta. Öppna appen från Connect-projektet${detail}`);
+        }
       }
     })();
     return () => { alive = false; window.removeEventListener('message', onMessage); };
   }, []);
   const launch = async () => {
+    if (!api || !projectRef.current?.id) {
+      setStatus('Ingen Connect-session hittades. Öppna TC Codex från Apps & Capabilities i samma projekt.');
+      return;
+    }
     const child = window.open(`${location.origin}${location.pathname}#/editor`, '_blank');
     if (!child) { setStatus('Tillåt popup-fönster för att öppna editorn.'); return; }
     childRef.current = child;
