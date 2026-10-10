@@ -704,6 +704,9 @@ export default function App() {
   const [measurePoint, setMeasurePoint] = useState<{ x: number; y: number; z: number } | null>(null);
   const [measurement, setMeasurement] = useState<number | null>(null);
   const [measurementHistory, setMeasurementHistory] = useState<number[]>([]);
+  const [measureSnapPreview, setMeasureSnapPreview] = useState<{ x: number; y: number; type: string } | null>(null);
+  const ifcGestureRef = useRef<{ pointerId: number; button: number; startX: number; startY: number; lastX: number; lastY: number; moved: boolean } | null>(null);
+  const suppressIfcClickRef = useRef(false);
   const [activeTab, setActiveTab] = useState<'modell' | 'projekt'>('modell');
   const [query, setQuery] = useState('');
   const [notice, setNotice] = useState('');
@@ -864,8 +867,8 @@ export default function App() {
   };
   const choosePaletteTool = (action: string) => {
     if (action.startsWith('dxf:')) { window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: action.slice(4) })); return; }
-    if (action === 'select') { setTool('select'); setMeasurePoint(null); setMeasurement(null); }
-    else if (action === 'measure') { if (active?.kind !== 'IFC') { setNotice('Mätverktyget kräver en IFC-modell.'); return; } setTool('measure'); setMeasurePoint(null); setMeasurement(null); }
+    if (action === 'select') { setTool('select'); setMeasurePoint(null); setMeasurement(null); setMeasureSnapPreview(null); }
+    else if (action === 'measure') { if (active?.kind !== 'IFC') { setNotice('Mätverktyget kräver en IFC-modell.'); return; } setTool('measure'); setMeasurePoint(null); setMeasurement(null); setMeasureSnapPreview(null); }
     else if (action === 'section') { if (active?.kind !== 'IFC') { setNotice('Snittverktyget kräver en IFC-modell.'); return; } setTool('section'); setSectionOn((value) => !value); }
     else if (action === 'fit') { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else if (active?.kind === 'DXF') window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: 'fit' })); else if (active?.kind === 'GLTF') window.dispatchEvent(new Event('tc-codex:gltf-fit')); else setNotice('Öppna en modell för att anpassa vyn.'); }
     else if (action === 'files') setShowFiles(true);
@@ -899,18 +902,24 @@ export default function App() {
 
   const selectViewport = async (event: MouseEvent<HTMLCanvasElement>) => {
     if (active?.kind !== 'IFC' || !rendererRef.current) return;
+    if (suppressIfcClickRef.current) { suppressIfcClickRef.current = false; return; }
     const rect = event.currentTarget.getBoundingClientRect();
-    const picked = await rendererRef.current.pick(event.clientX - rect.left, event.clientY - rect.top, { hiddenIds, isolatedIds });
     if (tool === 'measure') {
-      if (!picked?.worldXYZ) { setNotice('Klicka på en synlig IFC-yta för att mäta.'); return; }
-      const point = picked.worldXYZ;
-      if (!measurePoint) { setMeasurePoint(point); setMeasurement(null); setNotice('Första mätpunkten vald. Välj nästa punkt.'); }
+      const hit = rendererRef.current.raycastScene(event.clientX - rect.left, event.clientY - rect.top, {
+        hiddenIds, isolatedIds,
+        snapOptions: { snapToVertices: true, snapToEdges: true, snapToFaces: true, screenSnapRadius: 22, snapRadius: 0.1 },
+      });
+      if (!hit) { setNotice('Klicka på en synlig IFC-yta eller nära ett hörn/en kant.'); return; }
+      const point = hit.snap?.position ?? hit.intersection.point;
+      const snapLabel = hit.snap?.type === 'vertex' ? 'hörn' : hit.snap?.type === 'edge' ? 'kant' : hit.snap?.type === 'face_center' ? 'centrum' : null;
+      if (!measurePoint) { setMeasurePoint(point); setMeasurement(null); setNotice(snapLabel ? `Första mätpunkten snappad till ${snapLabel}. Välj nästa punkt.` : 'Första mätpunkten vald på ytan. Välj nästa punkt.'); }
       else {
         const distance = Math.hypot(point.x - measurePoint.x, point.y - measurePoint.y, point.z - measurePoint.z) * (ifcStore?.lengthUnitScale ?? 1);
-        setMeasurement(distance); setMeasurementHistory((items) => [distance, ...items].slice(0, 20)); setMeasurePoint(null); setNotice(`Avstånd: ${distance.toFixed(3)} m`);
+        setMeasurement(distance); setMeasurementHistory((items) => [distance, ...items].slice(0, 20)); setMeasurePoint(null); setNotice(`${snapLabel ? `Snäppt till ${snapLabel} · ` : ''}Avstånd: ${distance.toFixed(3)} m`);
       }
       return;
     }
+    const picked = await rendererRef.current.pick(event.clientX - rect.left, event.clientY - rect.top, { hiddenIds, isolatedIds });
     const id = picked?.expressId ?? null;
     if (event.shiftKey && id) {
       setSelectedIfcIds((current) => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
@@ -929,6 +938,55 @@ export default function App() {
       ...extractQuantitiesOnDemand(ifcStore, id).flatMap((set) => set.quantities.map((quantity) => ({ name: `${set.name} · ${quantity.name}`, value: String(quantity.value) }))),
     ];
     setSelectedProperties(rows.slice(0, 18)); setNotice(`${entity?.type || 'IFC-objekt'} · #${id} markerad`);
+  };
+  const beginIfcGesture = (event: PointerEvent<HTMLCanvasElement>) => {
+    if (event.button === 2 && tool !== 'measure') event.preventDefault();
+    if (event.button === 0 && tool === 'measure') return;
+    if (event.button !== 0 && event.button !== 1 && event.button !== 2) return;
+    ifcGestureRef.current = { pointerId: event.pointerId, button: event.button === 0 && event.shiftKey ? 3 : event.button, startX: event.clientX, startY: event.clientY, lastX: event.clientX, lastY: event.clientY, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const moveIfcGesture = (event: PointerEvent<HTMLCanvasElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (active?.kind === 'IFC' && tool === 'measure' && rendererRef.current) {
+      const hit = rendererRef.current.raycastScene(event.clientX - rect.left, event.clientY - rect.top, {
+        hiddenIds, isolatedIds,
+        snapOptions: { snapToVertices: true, snapToEdges: true, snapToFaces: true, screenSnapRadius: 22, snapRadius: 0.1 },
+      });
+      if (hit) {
+        const point = hit.snap?.position ?? hit.intersection.point;
+        const projected = rendererRef.current.getCamera().projectToScreen(point, event.currentTarget.width, event.currentTarget.height);
+        const scaleX = rect.width / event.currentTarget.width, scaleY = rect.height / event.currentTarget.height;
+        setMeasureSnapPreview(projected ? { x: projected.x * scaleX, y: projected.y * scaleY, type: hit.snap?.type || 'face' } : null);
+      } else setMeasureSnapPreview(null);
+    } else if (measureSnapPreview) setMeasureSnapPreview(null);
+    const gesture = ifcGestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    const dx = event.clientX - gesture.lastX, dy = event.clientY - gesture.lastY;
+    if (!gesture.moved && Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) > 3) gesture.moved = true;
+    if (gesture.moved && rendererRef.current) {
+      const camera = rendererRef.current.getCamera();
+      if (gesture.button === 0) camera.orbit(dx, dy, true);
+      else camera.pan(dx, dy, true);
+      rendererRef.current.requestRender();
+    }
+    gesture.lastX = event.clientX; gesture.lastY = event.clientY;
+  };
+  const endIfcGesture = (event: PointerEvent<HTMLCanvasElement>) => {
+    const gesture = ifcGestureRef.current;
+    if (gesture?.pointerId === event.pointerId) {
+      suppressIfcClickRef.current = gesture.moved;
+      ifcGestureRef.current = null;
+    }
+  };
+  const zoomIfcAtPointer = (event: React.WheelEvent<HTMLCanvasElement>) => {
+    if (!rendererRef.current) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = (event.clientX - rect.left) * event.currentTarget.width / rect.width;
+    const y = (event.clientY - rect.top) * event.currentTarget.height / rect.height;
+    rendererRef.current.getCamera().zoom(event.deltaY, false, x, y, event.currentTarget.width, event.currentTarget.height);
+    rendererRef.current.requestRender();
   };
 
   const hideSelected = () => {
@@ -1053,8 +1111,9 @@ export default function App() {
       <aside className="left-rail"><button className="rail-active" title="Modeller" onClick={() => { setActiveTab('modell'); if (!active) setShowImport(true); }}><Box size={17}/></button><button title="Trimble Connect-filer" onClick={() => setShowFiles(true)}><Folder size={17}/></button><button title="DXF-lager" disabled={active?.kind !== 'DXF'} onClick={() => window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: 'layers' }))}><Layers3 size={17}/></button><div className="rail-bottom"><button title="Inställningar" onClick={() => setShowSettings(true)}><Settings2 size={17}/></button><button title="Hjälp" onClick={() => setShowHelp(true)}><CircleHelp size={17}/></button></div></aside>
       <aside className="model-panel"><div className="panel-heading"><div><span className="panel-eyebrow">ARBETSPLATS</span><h2>Modellfiler</h2></div><button className="mini-icon" title="Lägg till fil" onClick={() => inputRef.current?.click()}><Plus size={16}/></button></div><button className="connect-folder" onClick={() => setShowFiles(true)}><span className="folder-square"><Cloud size={16}/></span><span><b>Trimble Connect</b><small>{connectProject?.name || 'NSV · DP1, DP2 & DP3'}</small></span><ChevronRight size={15}/></button><div className="search-box"><Search size={14}/><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Sök modell eller ritning"/><kbd>⌘ K</kbd></div><div className="list-heading"><span>ARBETSFILER <b>{visibleModels.length}</b></span><button title="Visa endast IFC-filer" onClick={() => setQuery((value) => value ? '' : 'ifc')}><ListFilter size={14}/></button></div><div className="model-list">{visibleModels.map((model, i) => <button key={model.name} onClick={() => openModel(model)} className={`model-row ${active?.name === model.name ? 'model-active' : ''}`}><span className={`file-chip ${model.kind === 'IFC' ? 'ifc-chip' : model.kind === 'DXF' ? 'dxf-chip' : 'cloud-chip'}`}>{model.kind === 'Punktmoln' ? 'LAS' : model.kind}</span><span className="model-info"><b>{model.name}</b><small>{model.size} <i>·</i> {model.entities ? `${model.entities.toLocaleString('sv-SE')} objekt` : 'Connect-fil'}</small></span><span className="row-more"><MoreHorizontal size={15}/></span></button>)}</div><button className="add-model-button" onClick={() => inputRef.current?.click()}><Plus size={15}/> Lägg till lokal fil</button><button className="library-button" onClick={() => setShowSketchfab(true)}><Cuboid size={14}/> Sök Sketchfab</button><button className="library-button" onClick={() => { window.open('https://3dwarehouse.sketchup.com/', '_blank', 'noopener,noreferrer'); setNotice('3D Warehouse öppnades i en ny flik. Ladda ned en kompatibel IFC- eller glTF-modell för import.'); }}><ExternalLink size={14}/> Öppna 3D Warehouse</button><div className="panel-footer"><span className="storage-icon"><HardDrive size={14}/></span><span><b>Lokala filer</b><small>Bara dina öppna filer</small></span><button onClick={() => setShowFiles(true)}><Link2 size={14}/></button></div></aside>
       <main className="editor-main"><div className="editor-header"><div className="breadcrumb"><span>{connectProject?.name || 'Trimble Connect'}</span><ChevronRight size={13}/><b>{active?.name || 'Modellvy'}</b></div><div className="editor-header-actions"><span className="format-pill"><span className={active?.kind === 'DXF' ? 'format-orange' : ''}/>{active?.kind || '3D'}</span><button className="mini-icon" onClick={() => setShowFiles(true)} title="Öppna Connect-filer"><FolderOpen size={15}/></button><button className="mini-icon" aria-pressed={showGrid} onClick={() => setShowGrid((value) => !value)} title={showGrid ? 'Dölj rutnät' : 'Visa rutnät'}><Grid2X2 size={15}/></button></div></div><div className="editor-tabs"><button className={activeTab === 'modell' ? 'tab-active' : ''} onClick={() => setActiveTab('modell')}>Modell <span>01</span></button><button className={activeTab === 'projekt' ? 'tab-active' : ''} onClick={() => { setActiveTab('projekt'); setShowFiles(true); }}>Connect <span><Cloud size={12}/></span></button><button className="tab-add" onClick={() => setShowImport(true)} title="Importera modell"><Plus size={14}/></button></div>
-        <div ref={viewportRef} className="viewport-wrap" onPointerMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); pointerPositionRef.current = { x: event.clientX - rect.left, y: event.clientY - rect.top }; moveToolPalette(event); }} onContextMenu={(event) => { event.preventDefault(); openToolPalette(); }} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files[0]) acceptFile(e.dataTransfer.files[0]); }}>
-          {active?.kind === 'GLTF' && active.file ? <GltfViewport file={active.file} onStatus={setNotice} showGrid={showGrid}/> : (active?.kind === 'IFC' || active?.kind === 'Punktmoln') && active.file ? <canvas ref={canvasRef} onClick={(event) => void selectViewport(event)} className={`ifc-canvas ${tool === 'measure' ? 'measure-cursor' : ''}`} aria-label={active.kind === 'IFC' ? 'IFC 3D-modell' : 'Punktmoln'} /> : <EditableDrawing active={active} showGrid={showGrid} onModified={(file) => { setPendingEditFile(file); setNotice(`${file.name} klar att ladda upp till Trimble Connect.`); }} onFit={() => { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: 'fit' })); setNotice('Vyn anpassad efter modellen.'); }}/ >}
+        <div ref={viewportRef} className="viewport-wrap" onPointerMove={(event) => { const rect = event.currentTarget.getBoundingClientRect(); pointerPositionRef.current = { x: event.clientX - rect.left, y: event.clientY - rect.top }; moveToolPalette(event); }} onContextMenu={(event) => { event.preventDefault(); if (suppressIfcClickRef.current) suppressIfcClickRef.current = false; else openToolPalette(); }} onDragOver={(e) => e.preventDefault()} onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files[0]) acceptFile(e.dataTransfer.files[0]); }}>
+          {active?.kind === 'GLTF' && active.file ? <GltfViewport file={active.file} onStatus={setNotice} showGrid={showGrid}/> : (active?.kind === 'IFC' || active?.kind === 'Punktmoln') && active.file ? <canvas ref={canvasRef} onClick={(event) => void selectViewport(event)} onPointerDown={beginIfcGesture} onPointerMove={moveIfcGesture} onPointerUp={endIfcGesture} onPointerCancel={endIfcGesture} onPointerLeave={() => setMeasureSnapPreview(null)} onWheel={zoomIfcAtPointer} onContextMenu={(event) => { if (!ifcGestureRef.current?.moved) event.preventDefault(); }} className={`ifc-canvas ${tool === 'measure' ? 'measure-cursor' : ''}`} aria-label={active.kind === 'IFC' ? 'IFC 3D-modell' : 'Punktmoln'} /> : <EditableDrawing active={active} showGrid={showGrid} onModified={(file) => { setPendingEditFile(file); setNotice(`${file.name} klar att ladda upp till Trimble Connect.`); }} onFit={() => { if (active?.kind === 'IFC' || active?.kind === 'Punktmoln') rendererRef.current?.fitToView(); else window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: 'fit' })); setNotice('Vyn anpassad efter modellen.'); }}/ >}
+          {tool === 'measure' && measureSnapPreview && <div className={`measure-snap-marker ${measureSnapPreview.type}`} style={{ left: measureSnapPreview.x, top: measureSnapPreview.y }} aria-label={measureSnapPreview.type === 'vertex' ? 'Snäppunkt: hörn' : measureSnapPreview.type === 'edge' ? 'Snäppunkt: kant' : 'Snäppunkt: yta'}><span>{measureSnapPreview.type === 'vertex' ? 'HÖRN' : measureSnapPreview.type === 'edge' ? 'KANT' : 'YTA'}</span></div>}
           {showGrid && (active?.kind === 'IFC' || active?.kind === 'Punktmoln') && <div className="model-grid-overlay"/>}
           {active?.kind !== 'DXF' && (!active?.file || (active.kind === 'Punktmoln' && !active.file)) && <div className="scene-model" aria-hidden="true"><svg viewBox="0 0 900 500"><defs><linearGradient id="sfa" x2="1" y2="1"><stop stopColor="#cfdbc5"/><stop offset="1" stopColor="#9aa897"/></linearGradient></defs><ellipse cx="456" cy="407" rx="282" ry="37" fill="#000" opacity=".36"/><path d="m205 213 267-125 221 79-267 125z" fill="#59665d" stroke="#bac9b4"/><path d="m205 213 221 79v93l-221-80z" fill="#314139" stroke="#a8b7a5"/><path d="m426 292 267-125v94L426 385z" fill="url(#sfa)" stroke="#e3ead7"/><path d="m244 210 45-21v100l-45-16zm70-33 45-21v127l-45-16zm158 121 42-20v62l-42 20zm66-31 43-20v62l-43 20zm67-32 42-20v62l-42 20z" fill="#192624" stroke="#89998c"/><path d="m426 292 267-125M205 213l267-125" stroke="#f0f4e5" opacity=".56"/></svg></div>}
           <div className="viewport-hud"><span className="hud-live"><i/>{active?.file ? 'LOKAL MODELL' : 'FÖRHANDSVISNING'}</span><span className="hud-coords">{selectedId ? `IFC #${selectedId}` : 'X 0,00  ·  Y 0,00  ·  Z 0,00 m'}</span></div><div className="view-controls"><button className="viewcube" title="Toppvy" onClick={() => { if (active?.kind === 'IFC') { rendererRef.current?.getCamera().setPresetView('top'); setNotice('Toppvy aktiv.'); } else if (active?.kind === 'DXF') window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: 'fit' })); else if (active?.kind === 'GLTF') window.dispatchEvent(new Event('tc-codex:gltf-top')); else setNotice('Öppna en modell för att ändra vy.'); }}>TOP</button><button title="Växla perspektiv" disabled={active?.kind !== 'IFC'} onClick={() => { if (rendererRef.current) { rendererRef.current.getCamera().toggleProjectionMode(); setNotice(rendererRef.current.getCamera().getProjectionMode() === 'orthographic' ? 'Ortografisk vy aktiv.' : 'Perspektivvy aktiv.'); } else setNotice('Perspektivväxling finns för IFC-modeller.'); }}><Cuboid size={15}/></button><button title="Visa alla objekt" onClick={() => { if (active?.kind === 'IFC') resetVisibility(); else if (active?.kind === 'DXF') window.dispatchEvent(new CustomEvent('tc-codex:dxf-tool', { detail: 'showall' })); else setNotice('Hela modellen visas redan.'); }}><Eye size={15}/></button></div>
@@ -1073,7 +1132,7 @@ export default function App() {
     <input ref={inputRef} hidden type="file" accept=".ifc,.dxf,.glb,.gltf,.zip,.las,.laz,.ply,.e57,.copc,.pcd,.pts,.xyz" onChange={(e) => e.target.files?.[0] && acceptFile(e.target.files[0])}/>
     {showConnect && <ConnectDialog close={() => setShowConnect(false)} />}{showFiles && <FilesDialog close={() => setShowFiles(false)} models={models} open={openModel} projectId={connectProject?.id} projectName={connectProject?.name} projectRegion={connectProject?.region} token={connectToken} activeFile={pendingEditFile || active?.file} onImport={acceptFile} onNotice={setNotice} />}{showImport && <ImportDialog close={() => setShowImport(false)} pickFile={() => inputRef.current?.click()} />}{showSketchfab && <SketchfabDialog close={() => setShowSketchfab(false)} onImport={acceptFile} onNotice={setNotice} />}
     {showSettings && <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setShowSettings(false)}><section className="connect-modal"><button className="modal-close" onClick={() => setShowSettings(false)}><X size={17}/></button><span className="modal-mark"><Settings2 size={20}/></span><span className="panel-eyebrow">MODELLSTUDIO</span><h2>Inställningar</h2><p>Anpassa arbetsytan. Inställningarna gäller den här fliken.</p><label className="setting-row"><span><b>Visa rutnät</b><small>Ritningsrutnät i modellvyn</small></span><input type="checkbox" checked={showGrid} onChange={(event) => setShowGrid(event.target.checked)}/></label><label className="setting-row"><span><b>Visa egenskapspanel</b><small>Objektinformation vid sidan</small></span><input type="checkbox" checked={showProperties} onChange={(event) => setShowProperties(event.target.checked)}/></label><button className="primary-button full-button" onClick={() => setShowSettings(false)}>Klar</button></section></div>}
-    {showHelp && <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setShowHelp(false)}><section className="connect-modal"><button className="modal-close" onClick={() => setShowHelp(false)}><X size={17}/></button><span className="modal-mark"><CircleHelp size={20}/></span><span className="panel-eyebrow">SNABBGUIDE</span><h2>Verktyg i modellvyn</h2><p>Öppna verktygspaletten från verktygsraden eller högerklicka i vyn. Dra palettens rubrik för att flytta den; tryck Esc för att stänga.</p><div className="help-shortcuts"><div><kbd>Ctrl/⌘ Z</kbd><span>Ångra senaste redigering</span></div><div><kbd>Ctrl/⌘ Shift Z</kbd><span>Gör om redigering</span></div><div><kbd>Delete</kbd><span>Ta bort markerat DXF-objekt</span></div><div><kbd>Skift + klick</kbd><span>Välj flera IFC-objekt</span></div><div><kbd>Scrolla</kbd><span>Zooma i en DXF-ritning</span></div></div><button className="primary-button full-button" onClick={() => setShowHelp(false)}>Stäng</button></section></div>}
+    {showHelp && <div className="modal-scrim" onMouseDown={(event) => event.target === event.currentTarget && setShowHelp(false)}><section className="connect-modal"><button className="modal-close" onClick={() => setShowHelp(false)}><X size={17}/></button><span className="modal-mark"><CircleHelp size={20}/></span><span className="panel-eyebrow">SNABBGUIDE</span><h2>Verktyg i modellvyn</h2><p>Öppna verktygspaletten från verktygsraden eller högerklicka i vyn. Dra palettens rubrik för att flytta den; tryck Esc för att stänga.</p><div className="help-shortcuts"><div><kbd>Vänsterdra</kbd><span>Rotera IFC och punktmoln</span></div><div><kbd>Mitten/höger-dra</kbd><span>Panorera modellen</span></div><div><kbd>Scrolla</kbd><span>Zooma vid pekaren</span></div><div><kbd>Mät</kbd><span>Snäpper till hörn och kanter inom markören</span></div><div><kbd>Ctrl/⌘ Z</kbd><span>Ångra senaste redigering</span></div><div><kbd>Ctrl/⌘ Shift Z</kbd><span>Gör om redigering</span></div><div><kbd>Delete</kbd><span>Ta bort markerat DXF-objekt</span></div><div><kbd>Skift + klick</kbd><span>Välj flera IFC-objekt</span></div></div><button className="primary-button full-button" onClick={() => setShowHelp(false)}>Stäng</button></section></div>}
     <div className="toast-host">{notice && <button className="toast" onClick={() => setNotice('')}><span className="toast-icon"><Check size={14}/></span>{notice}<X size={14}/></button>}</div>
   </div>;
 }
