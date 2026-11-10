@@ -8,6 +8,7 @@ Trimble Connect-extension som kopplar modellens objekt till en tidplan och spela
 - **Koppla för hand** – markera objekt i 3D-vyn och koppla dem till en aktivitet.
 - **Uppspelning** – tidslinje med uppspelning och stegning. Ej påbörjat döljs, pågående färgas, färdigt visas i modellens egna färger. Aktivitetstyperna Bygg, Riv och Tillfällig styr vad som händer före och efter.
 - **Importera datum** – rader med `namn;start;slut` (klistra in från Excel eller välj CSV) uppdaterar aktiviteter med samma namn.
+- **Lösenord** – appen frågar efter ett lösenord en gång per webbläsarsession. Det håller bara tillfälliga besökare ute; sidan är publik och koden kan läsas av vem som helst.
 - **Spara** – planen sparas i webbläsaren per projekt och kan exporteras/öppnas som JSON. Objekt sparas med IFC-GUID så att kopplingarna överlever nya modellversioner.
 
 ## Köra lokalt

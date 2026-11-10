@@ -82,3 +82,7 @@ button.danger { color: var(--danger); }
   .demo-layout { grid-template-columns: 1fr; grid-template-rows: 40% 60%; }
   .demo-layout .panel { border-left: 0; border-top: 1px solid var(--line); }
 }
+
+.lock { display: flex; flex-direction: column; gap: 10px; max-width: 260px; margin-top: 16px; }
+.lock label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); }
+.lock input { border: 1px solid var(--line); border-radius: 6px; background: var(--bg); padding: 5px 9px; min-height: 30px; }

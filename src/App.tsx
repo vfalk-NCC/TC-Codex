@@ -12,7 +12,46 @@ import {
 const count = (refs: ObjRef[]) => refs.reduce((n, r) => n + r.ids.length, 0);
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/** SHA-256 of the access code. This only keeps casual visitors out: the app is a public static site, so it is not real access control. */
+const ACCESS_HASH = '8bb0cf6eb9b17d0f7d22b456f121257dc1254e1f01665370476383ea776df414';
+const ACCESS_KEY = 'tc-codex-4d:unlocked';
+
+async function sha256(text: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function wasUnlocked() {
+  try { return sessionStorage.getItem(ACCESS_KEY) === ACCESS_HASH; } catch { return false; }
+}
+
 export default function App() {
+  const [unlocked, setUnlocked] = useState(wasUnlocked);
+  const [password, setPassword] = useState('');
+  const [wrong, setWrong] = useState(false);
+
+  if (unlocked) return <Connected />;
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if ((await sha256(password)) !== ACCESS_HASH) { setWrong(true); return; }
+    try { sessionStorage.setItem(ACCESS_KEY, ACCESS_HASH); } catch { /* asks again next time */ }
+    setUnlocked(true);
+  };
+  return (
+    <main className="splash">
+      <h1>4D-light</h1>
+      <form className="lock" onSubmit={(e) => void submit(e)}>
+        <label>Lösenord
+          <input type="password" value={password} autoFocus autoComplete="current-password" onChange={(e) => { setPassword(e.target.value); setWrong(false); }} />
+        </label>
+        {wrong && <p className="error" role="alert">Fel lösenord.</p>}
+        <button className="primary" disabled={!password}>Öppna</button>
+      </form>
+    </main>
+  );
+}
+
+function Connected() {
   const [viewer, setViewer] = useState<ViewerPort | null>(null);
   const [error, setError] = useState('');
 
