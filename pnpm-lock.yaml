@@ -14,6 +14,9 @@ importers:
       react-dom:
         specifier: ^18.3.1
         version: 18.3.1(react@18.3.1)
+      trimble-connect-workspace-api:
+        specifier: ^0.3.38
+        version: 0.3.38
     devDependencies:
       '@types/react':
         specifier: ^18.3.12
@@ -587,6 +590,9 @@ packages:
     resolution: {integrity: sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==}
     engines: {node: '>=12.0.0'}
 
+  trimble-connect-workspace-api@0.3.38:
+    resolution: {integrity: sha512-KcmxJpRMAJ684ppsJp591GaURF5RSNC2eR8/c7Q60ze3oe0RVdjnsnMKoZk7b9Rdc3BwN1Bz+yJZWF2Ew1QVIw==}
+
   typescript@5.7.3:
     resolution: {integrity: sha512-84MVSjMEHP+FQRPy3pX9sTVV/INIex71s9TL2Gm5FG/WG1SqXeKyZ0k7/blY/4FdOzI12CBy1vGc4og/eus0fw==}
     engines: {node: '>=14.17'}
@@ -1126,6 +1132,8 @@ snapshots:
     dependencies:
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
+
+  trimble-connect-workspace-api@0.3.38: {}
 
   typescript@5.7.3: {}
 

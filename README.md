@@ -1,6 +1,14 @@
-# TC Codex
+# TC Codex · 4D-light
 
-Trimble Connect-extension byggd med Vite, React och TypeScript.
+Trimble Connect-extension som kopplar modellens objekt till en tidplan och spelar upp bygget i 3D-vyn. Byggd med Vite, React och TypeScript.
+
+## Funktioner
+
+- **Skapa från modell** – en aktivitet per värde på en vald egenskap (t.ex. våning), per IFC-klass, eller per höjdnivå nedifrån och upp.
+- **Koppla för hand** – markera objekt i 3D-vyn och koppla dem till en aktivitet.
+- **Uppspelning** – tidslinje med uppspelning och stegning. Ej påbörjat döljs, pågående färgas, färdigt visas i modellens egna färger. Aktivitetstyperna Bygg, Riv och Tillfällig styr vad som händer före och efter.
+- **Importera datum** – rader med `namn;start;slut` (klistra in från Excel eller välj CSV) uppdaterar aktiviteter med samma namn.
+- **Spara** – planen sparas i webbläsaren per projekt och kan exporteras/öppnas som JSON. Objekt sparas med IFC-GUID så att kopplingarna överlever nya modellversioner.
 
 ## Köra lokalt
 
@@ -8,6 +16,15 @@ Trimble Connect-extension byggd med Vite, React och TypeScript.
 corepack pnpm install
 corepack pnpm dev
 ```
+
+Utanför Trimble Connect startar appen i demoläge med en inbyggd exempelmodell.
+
+## Kod
+
+- `src/viewer.ts` – gränssnittet mot 3D-vyn (`ViewerPort`) och kopplingen till Trimble Connect Workspace API.
+- `src/demo.ts`, `src/DemoScene.tsx` – demovyn.
+- `src/schedule.ts` – tidplan, färgläggning, generering, import och lagring.
+- `src/App.tsx` – gränssnittet.
 
 ## Trimble Connect
 
