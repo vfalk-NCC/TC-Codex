@@ -269,7 +269,7 @@ export function ToolsDialog(props: {
       </div>
 
       <h3>Rensa</h3>
-      <button className="danger" disabled={!plan.activities.length && !plan.areas.length && !plan.masks.length} onClick={props.onClear}>Töm hela planen</button>
+      <button className="danger" disabled={!plan.activities.length && !plan.areas.length && !plan.masks.length && !plan.milestones.length} onClick={props.onClear}>Töm hela planen</button>
     </Dialog>
   );
 }
