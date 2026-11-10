@@ -18,6 +18,8 @@ export interface ViewerPort {
   /** `refs` undefined means every object in the loaded models. */
   apply(refs: ObjRef[] | undefined, state: ObjState): Promise<void>;
   resetAll(): Promise<void>;
+  /** Moves the camera so the objects fill the view. */
+  focus(refs: ObjRef[]): Promise<void>;
   getProperties(modelId: string, ids: number[]): Promise<ObjInfo[]>;
   getBottomZ(modelId: string, ids: number[]): Promise<{ id: number; z: number }[]>;
   /** Persistent ids (IFC GUIDs). Null when the model has none. */
@@ -70,6 +72,9 @@ export async function connectTrimble(): Promise<ViewerPort> {
     },
     async resetAll() {
       await viewer.setObjectState(undefined, { visible: 'reset', color: 'reset' });
+    },
+    async focus(refs) {
+      await viewer.setCamera(selector(refs)!, { animationTime: 400 });
     },
     async getProperties(modelId, ids) {
       const objects = await viewer.getObjectProperties(modelId, ids);
