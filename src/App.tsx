@@ -4,9 +4,9 @@ import { DemoViewer } from './demo';
 import { connectTrimble, type ModelInfo, type ObjRef, type ViewerPort } from './viewer';
 import {
   CLASS_KEY, LinkResolver, PALETTE, Painter, TYPE_LABEL, activitiesFromGroups, formatDay, groupsByHeight, groupsFromProperty,
-  importDates, linkCount, loadPlan, makeLinks, mergeLinks, newId, parsePlan, phaseOf, planRange, progress, savePlan, scanProperties,
+  importDates, linkCount, loadPlan, makeLinks, mergeLinks, moveActivity, newId, parsePlan, phaseOf, planRange, progress, removeArea, savePlan, scanProperties,
   sortedKeys, toDay, toIso, today,
-  type Activity, type ActivityType, type Plan, type PropertyIndex, type Unlinked,
+  type Activity, type ActivityType, type Area, type Plan, type PropertyIndex, type Unlinked,
 } from './schedule';
 
 const count = (refs: ObjRef[]) => refs.reduce((n, r) => n + r.ids.length, 0);
@@ -85,6 +85,10 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
   const [dialog, setDialog] = useState<'generate' | 'import' | null>(null);
   const [notice, setNotice] = useState('');
   const fileInput = useRef<HTMLInputElement>(null);
+  const [drag, setDrag] = useState<string | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [renaming, setRenaming] = useState<string | null>(null);
 
   const range = useMemo(() => planRange(plan), [plan]);
   const min = range.start - 1, max = range.end + 1;
@@ -147,12 +151,23 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
     if (refs.length) await viewer.select(refs);
     else setNotice('Aktivitetens objekt finns inte i de modeller som är laddade.');
   };
-  const addActivity = () => {
+  const addActivity = (areaId?: string) => {
     const start = toIso(plan.activities.length ? range.end + 1 : toDay(today()));
-    const activity: Activity = { id: newId(), name: `Aktivitet ${plan.activities.length + 1}`, start, end: toIso(toDay(start) + 4), type: 'build', color: PALETTE[plan.activities.length % PALETTE.length], links: [] };
+    const activity: Activity = { id: newId(), name: `Aktivitet ${plan.activities.length + 1}`, start, end: toIso(toDay(start) + 4), type: 'build', color: PALETTE[plan.activities.length % PALETTE.length], links: [], areaId };
     setPlan((p) => ({ ...p, activities: [...p.activities, activity] }));
     setOpen(activity.id);
   };
+  const addArea = () => {
+    const area: Area = { id: newId(), name: 'Nytt område' };
+    setPlan((p) => ({ ...p, areas: [...p.areas, area] }));
+    setRenaming(area.id);
+  };
+  const dropOn = (areaId: string | undefined, beforeId?: string) => {
+    if (drag) setPlan((p) => moveActivity(p, drag, areaId, beforeId));
+    setDrag(null);
+    setOver(null);
+  };
+  const toggleCollapsed = (key: string) => setCollapsed((c) => { const next = new Set(c); if (!next.delete(key)) next.add(key); return next; });
   const exportPlan = () => {
     const url = URL.createObjectURL(new Blob([JSON.stringify(plan, null, 2)], { type: 'application/json' }));
     const a = document.createElement('a');
@@ -169,6 +184,16 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
   };
 
   const span = Math.max(1, max - min);
+  const row = (a: Activity) => (
+    <ActivityRow key={a.id} activity={a} areas={plan.areas} phase={phaseOf(a, day)} expanded={open === a.id} selected={selected}
+      left={((toDay(a.start) - min) / span) * 100} width={((toDay(a.end) - toDay(a.start) + 1) / span) * 100} cursor={((day - min) / span) * 100}
+      dragging={drag === a.id} over={over === `act:${a.id}`}
+      onDragStart={() => setDrag(a.id)} onDragEnd={() => { setDrag(null); setOver(null); }}
+      onDragOver={() => setOver(`act:${a.id}`)} onDrop={() => dropOn(a.areaId, a.id)} canDrop={!!drag && drag !== a.id}
+      onToggle={() => setOpen(open === a.id ? null : a.id)} onChange={(patch) => update(a.id, patch)}
+      onLink={(mode) => void link(a, mode)} onSelect={() => void selectObjects(a).catch((e) => setNotice(message(e)))}
+      onDelete={() => setPlan((p) => ({ ...p, activities: p.activities.filter((x) => x.id !== a.id) }))} />
+  );
   const panel = (
     <div className="panel">
       <header>
@@ -210,17 +235,44 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
             <button className="primary" disabled={!models.length} onClick={() => setDialog('generate')}>Skapa från modell</button>
           </div>
         )}
-        {plan.activities.map((a) => (
-          <ActivityRow key={a.id} activity={a} phase={phaseOf(a, day)} expanded={open === a.id} selected={selected}
-            left={((toDay(a.start) - min) / span) * 100} width={((toDay(a.end) - toDay(a.start) + 1) / span) * 100} cursor={((day - min) / span) * 100}
-            onToggle={() => setOpen(open === a.id ? null : a.id)} onChange={(patch) => update(a.id, patch)}
-            onLink={(mode) => void link(a, mode)} onSelect={() => void selectObjects(a).catch((e) => setNotice(message(e)))}
-            onDelete={() => setPlan((p) => ({ ...p, activities: p.activities.filter((x) => x.id !== a.id) }))} />
-        ))}
+        {plan.areas.length === 0 && plan.activities.map(row)}
+        {plan.areas.length > 0 && [...plan.areas, null].map((area) => {
+          const key = area?.id ?? '';
+          const items = plan.activities.filter((a) => (a.areaId ?? '') === key);
+          const from = items.length ? Math.min(...items.map((a) => toDay(a.start))) : min;
+          const to = items.length ? Math.max(...items.map((a) => toDay(a.end))) : min - 1;
+          const isCollapsed = collapsed.has(key);
+          return (
+            <section key={key} className={`area${over === `area:${key}` ? ' over' : ''}`} aria-label={area?.name ?? 'Utan område'}
+              onDragOver={(e) => { if (drag) { e.preventDefault(); setOver(`area:${key}`); } }} onDrop={(e) => { e.preventDefault(); dropOn(area?.id); }}>
+              <div className="area-head">
+                <button className="icon" onClick={() => toggleCollapsed(key)} aria-expanded={!isCollapsed} aria-label={isCollapsed ? 'Visa aktiviteter' : 'Dölj aktiviteter'}>{isCollapsed ? '▸' : '▾'}</button>
+                {area && renaming === area.id
+                  ? <input className="area-name" autoFocus value={area.name} aria-label="Områdets namn" onFocus={(e) => e.target.select()}
+                      onChange={(e) => setPlan((p) => ({ ...p, areas: p.areas.map((x) => (x.id === area.id ? { ...x, name: e.target.value } : x)) }))}
+                      onBlur={() => setRenaming(null)} onKeyDown={(e) => (e.key === 'Enter' || e.key === 'Escape') && setRenaming(null)} />
+                  : <span className="area-name" onDoubleClick={() => area && setRenaming(area.id)}>{area ? area.name || 'Namnlöst område' : 'Utan område'}</span>}
+                <span className="meta">{items.length} akt.</span>
+                {area && <>
+                  <button className="icon" onClick={() => addActivity(area.id)} aria-label="Ny aktivitet i området" title="Ny aktivitet i området">+</button>
+                  <button className="icon" onClick={() => setRenaming(area.id)} aria-label="Byt namn" title="Byt namn">✎</button>
+                  <button className="icon" onClick={() => setPlan((p) => removeArea(p, area.id))} aria-label="Ta bort område" title="Ta bort området (aktiviteterna behålls)">×</button>
+                </>}
+                <span className="bar-track">
+                  <span className="bar summary" style={{ left: `${((from - min) / span) * 100}%`, width: `${(Math.max(0, to - from + 1) / span) * 100}%` }} />
+                  <span className="cursor" style={{ left: `${((day - min) / span) * 100}%` }} />
+                </span>
+              </div>
+              {!isCollapsed && items.map(row)}
+              {!isCollapsed && !items.length && <p className="drop-hint">Dra aktiviteter hit</p>}
+            </section>
+          );
+        })}
       </section>
 
       <footer>
-        <button onClick={addActivity}>+ Aktivitet</button>
+        <button onClick={() => addActivity()}>+ Aktivitet</button>
+        <button onClick={addArea}>+ Område</button>
         <button disabled={!models.length} onClick={() => setDialog('generate')}>Skapa från modell</button>
         <button onClick={() => setDialog('import')}>Importera datum</button>
         <button onClick={exportPlan} disabled={!plan.activities.length}>Exportera plan</button>
@@ -260,14 +312,18 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
 }
 
 function ActivityRow(props: {
-  activity: Activity; phase: string; expanded: boolean; selected: number; left: number; width: number; cursor: number;
+  activity: Activity; areas: Area[]; phase: string; expanded: boolean; selected: number; left: number; width: number; cursor: number;
+  dragging: boolean; over: boolean; canDrop: boolean; onDragStart: () => void; onDragEnd: () => void; onDragOver: () => void; onDrop: () => void;
   onToggle: () => void; onChange: (patch: Partial<Activity>) => void; onLink: (mode: 'set' | 'add') => void; onSelect: () => void; onDelete: () => void;
 }) {
   const { activity: a, expanded, selected, onChange } = props;
   const objects = linkCount(a);
   return (
-    <article className={`activity ${props.phase}`}>
-      <button className="row" onClick={props.onToggle} aria-expanded={expanded}>
+    <article className={`activity ${props.phase}${props.dragging ? ' dragging' : ''}${props.over ? ' over' : ''}`}
+      onDragOver={(e) => { if (props.canDrop) { e.preventDefault(); e.stopPropagation(); props.onDragOver(); } }}
+      onDrop={(e) => { if (props.canDrop) { e.preventDefault(); e.stopPropagation(); props.onDrop(); } }}>
+      <button className="row" onClick={props.onToggle} aria-expanded={expanded} draggable title="Dra för att flytta"
+        onDragStart={(e) => { e.dataTransfer.setData('text/plain', a.id); e.dataTransfer.effectAllowed = 'move'; props.onDragStart(); }} onDragEnd={props.onDragEnd}>
         <span className="dot" style={{ background: a.color }} />
         <span className="name">{a.name}</span>
         <span className="meta">{objects} obj</span>
@@ -286,6 +342,14 @@ function ActivityRow(props: {
               {Object.entries(TYPE_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </label>
+          {props.areas.length > 0 && (
+            <label className="wide">Område
+              <select value={a.areaId ?? ''} onChange={(e) => onChange({ areaId: e.target.value || undefined })}>
+                <option value="">Utan område</option>
+                {props.areas.map((area) => <option key={area.id} value={area.id}>{area.name}</option>)}
+              </select>
+            </label>
+          )}
           <label>Färg<input type="color" value={a.color} onChange={(e) => onChange({ color: e.target.value })} /></label>
           <div className="wide buttons">
             <button disabled={!selected} onClick={() => props.onLink('set')}>Koppla markerade ({selected})</button>
@@ -390,7 +454,7 @@ function ImportDialog({ onClose, onImport }: { onClose: () => void; onImport: (t
   const [text, setText] = useState('');
   return (
     <Dialog title="Importera datum" onClose={onClose}>
-      <p className="hint">En rad per aktivitet: namn, start, slut. Klistra in från Excel eller välj en CSV-fil. Aktiviteter med samma namn får nya datum, övriga läggs till.</p>
+      <p className="hint">En rad per aktivitet: namn, start, slut och valfritt område. Klistra in från Excel eller välj en CSV-fil. Aktiviteter med samma namn får nya datum, övriga läggs till.</p>
       <textarea rows={8} value={text} onChange={(e) => setText(e.target.value)} placeholder={'Plan 1;2026-01-12;2026-01-23\nPlan 2;2026-01-26;2026-02-06'} />
       <input type="file" accept=".csv,.txt,text/csv,text/plain" onChange={(e) => void e.target.files?.[0]?.text().then(setText)} />
       <div className="dialog-actions">

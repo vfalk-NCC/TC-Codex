@@ -3,9 +3,12 @@ import type { ModelInfo, ObjRef, ObjState, ViewerPort } from './viewer';
 export type ActivityType = 'build' | 'demolish' | 'temp';
 /** Objects of one model, stored by persistent id when the model has them. */
 export type Link = { modelId: string; modelName: string; guids?: string[]; runtimeIds?: number[] };
-export type Activity = { id: string; name: string; start: string; end: string; type: ActivityType; color: string; links: Link[] };
+/** `areaId` places the activity in a WBS area; activities without one are listed under "Utan område". */
+export type Activity = { id: string; name: string; start: string; end: string; type: ActivityType; color: string; links: Link[]; areaId?: string };
+/** A user-defined WBS area, e.g. "741 - Sektionsfickor". */
+export type Area = { id: string; name: string };
 export type Unlinked = 'show' | 'ghost' | 'hide';
-export type Plan = { version: 1; unlinked: Unlinked; activities: Activity[] };
+export type Plan = { version: 1; unlinked: Unlinked; areas: Area[]; activities: Activity[] };
 export type Group = { name: string; refs: ObjRef[] };
 /** property key -> value -> modelId -> runtime ids */
 export type PropertyIndex = Map<string, Map<string, Map<string, number[]>>>;
@@ -17,7 +20,7 @@ const GHOST: ObjState = { color: '#9aa3ad', alpha: 50 };
 const MAX_VALUES = 400;
 const CHUNK = 400;
 
-export const emptyPlan = (): Plan => ({ version: 1, unlinked: 'ghost', activities: [] });
+export const emptyPlan = (): Plan => ({ version: 1, unlinked: 'ghost', areas: [], activities: [] });
 export const newId = () => Math.random().toString(36).slice(2, 10);
 export const toDay = (iso: string) => Math.round(Date.parse(`${iso}T00:00:00Z`) / 864e5);
 export const toIso = (day: number) => new Date(day * 864e5).toISOString().slice(0, 10);
@@ -56,6 +59,26 @@ export function progress(plan: Plan, day: number) {
     if (phase === 'after') done += linkCount(a);
   }
   return { total, done, active };
+}
+
+/* ---------- WBS areas ---------- */
+
+/** Moves an activity into an area (undefined = no area), before `beforeId` or last when omitted. */
+export function moveActivity(plan: Plan, id: string, areaId: string | undefined, beforeId?: string): Plan {
+  const moving = plan.activities.find((a) => a.id === id);
+  if (!moving || id === beforeId) return plan;
+  const rest = plan.activities.filter((a) => a.id !== id);
+  const at = beforeId ? rest.findIndex((a) => a.id === beforeId) : -1;
+  rest.splice(at < 0 ? rest.length : at, 0, { ...moving, areaId });
+  return { ...plan, activities: rest };
+}
+
+export function removeArea(plan: Plan, areaId: string): Plan {
+  return {
+    ...plan,
+    areas: plan.areas.filter((a) => a.id !== areaId),
+    activities: plan.activities.map((a) => (a.areaId === areaId ? { ...a, areaId: undefined } : a)),
+  };
 }
 
 /* ---------- Linking objects ---------- */
@@ -270,35 +293,47 @@ function parseDate(text: string): string | null {
   return Number.isNaN(Date.parse(`${iso}T00:00:00Z`)) || toIso(toDay(iso)) !== iso ? null : iso;
 }
 
-/** Rows of "name; start; end". Updates activities with the same name and adds the rest as new ones. */
+/** Rows of "name; start; end[; area]". Updates activities with the same name and adds the rest as new ones. */
 export function importDates(plan: Plan, text: string): { plan: Plan; updated: number; added: number; skipped: number } {
   const activities = plan.activities.map((a) => ({ ...a }));
+  const areas = [...plan.areas];
+  const areaFor = (name: string | undefined) => {
+    if (!name) return undefined;
+    let area = areas.find((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+    if (!area) areas.push((area = { id: newId(), name }));
+    return area.id;
+  };
   let updated = 0, added = 0, skipped = 0;
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   const delimiter = ['\t', ';', ','].find((d) => lines[0]?.includes(d)) ?? ';';
   lines.forEach((line, row) => {
-    const [name, a, b] = line.split(delimiter).map((c) => c.trim().replace(/^"|"$/g, ''));
+    const [name, a, b, areaName] = line.split(delimiter).map((c) => c.trim().replace(/^"|"$/g, ''));
     const start = parseDate(a ?? ''), end = parseDate(b ?? '');
     if (!name || !start || !end || end < start) { if (row > 0 || start || end) skipped++; return; }
     const existing = activities.find((x) => x.name.trim().toLowerCase() === name.toLowerCase());
-    if (existing) { existing.start = start; existing.end = end; updated++; }
-    else { activities.push({ id: newId(), name, start, end, type: 'build', color: PALETTE[activities.length % PALETTE.length], links: [] }); added++; }
+    const areaId = areaFor(areaName);
+    if (existing) { existing.start = start; existing.end = end; if (areaId) existing.areaId = areaId; updated++; }
+    else { activities.push({ id: newId(), name, start, end, type: 'build', color: PALETTE[activities.length % PALETTE.length], links: [], areaId }); added++; }
   });
-  return { plan: { ...plan, activities }, updated, added, skipped };
+  return { plan: { ...plan, areas, activities }, updated, added, skipped };
 }
 
 export function parsePlan(json: string): Plan | null {
   try {
     const raw = JSON.parse(json);
     if (!raw || !Array.isArray(raw.activities)) return null;
+    const areas: Area[] = (Array.isArray(raw.areas) ? raw.areas : [])
+      .filter((a: any) => a && typeof a.id === 'string' && typeof a.name === 'string')
+      .map((a: any) => ({ id: a.id, name: a.name }));
     const activities: Activity[] = raw.activities
       .filter((a: any) => a && typeof a.name === 'string' && parseDate(String(a.start)) && parseDate(String(a.end)))
       .map((a: any, i: number) => ({
         id: typeof a.id === 'string' ? a.id : newId(), name: a.name, start: a.start, end: a.end,
         type: a.type in TYPE_LABEL ? a.type : 'build', color: /^#[0-9a-f]{6}$/i.test(a.color) ? a.color : PALETTE[i % PALETTE.length],
         links: Array.isArray(a.links) ? a.links.filter((l: any) => l && typeof l.modelId === 'string' && (Array.isArray(l.guids) || Array.isArray(l.runtimeIds))) : [],
+        areaId: areas.some((x) => x.id === a.areaId) ? a.areaId : undefined,
       }));
-    return { version: 1, unlinked: ['show', 'ghost', 'hide'].includes(raw.unlinked) ? raw.unlinked : 'ghost', activities };
+    return { version: 1, unlinked: ['show', 'ghost', 'hide'].includes(raw.unlinked) ? raw.unlinked : 'ghost', areas, activities };
   } catch {
     return null;
   }
