@@ -1,20 +1,34 @@
-# TC Codex · Modellstudio
+# TC Codex · 4D-light
 
-An external 3D workspace launched from a Trimble Connect project or 3D Viewer extension. It provides local IFC/DXF workflows, point-cloud viewing, and a Connect file browser for importing and uploading supported model files.
+Trimble Connect-extension som kopplar modellens objekt till en tidplan och spelar upp bygget i 3D-vyn. Byggd med Vite, React och TypeScript.
 
-## Run locally
+## Funktioner
+
+- **Skapa från modell** – en aktivitet per värde på en vald egenskap (t.ex. våning), per IFC-klass, eller per höjdnivå nedifrån och upp.
+- **Koppla för hand** – markera objekt i 3D-vyn och koppla dem till en aktivitet.
+- **Uppspelning** – tidslinje med uppspelning och stegning. Ej påbörjat döljs, pågående färgas, färdigt visas i modellens egna färger. Aktivitetstyperna Bygg, Riv och Tillfällig styr vad som händer före och efter.
+- **Importera datum** – rader med `namn;start;slut` (klistra in från Excel eller välj CSV) uppdaterar aktiviteter med samma namn.
+- **Lösenord** – appen frågar efter ett lösenord en gång per webbläsarsession. Det håller bara tillfälliga besökare ute; sidan är publik och koden kan läsas av vem som helst.
+- **Spara** – planen sparas i webbläsaren per projekt och kan exporteras/öppnas som JSON. Objekt sparas med IFC-GUID så att kopplingarna överlever nya modellversioner.
+
+## Köra lokalt
 
 ```sh
 corepack pnpm install
 corepack pnpm dev
 ```
 
-Open `http://localhost:5173/#/editor` for the editor or `http://localhost:5173/#/trimble` for the Trimble Connect launch panel. IFC rendering uses WebGPU; DXF preview currently draws LINE, LWPOLYLINE and CIRCLE entities. Point clouds are decoded and rendered with IFClite, with sampling for large files.
+Utanför Trimble Connect startar appen i demoläge med en inbyggd exempelmodell.
 
-## Trimble Connect extension
+## Kod
 
-`public/manifest.json` describes an extension for both the project UI and the 3D Viewer. Host the built app at the URL in the manifest, then add the manifest URL in each Trimble Connect project where it should be available under **Project Settings → Apps & Capabilities → Add Custom**. Project administrators can add custom extensions. The extension obtains its Connect session from the Workspace API and passes the project context to the separate editor tab using same-origin `postMessage`; access tokens are kept in memory and are not put in URLs or local storage. If a manifest changes after an extension was added, re-add or refresh that project capability so Connect reads the current extension type.
+- `src/viewer.ts` – gränssnittet mot 3D-vyn (`ViewerPort`) och kopplingen till Trimble Connect Workspace API.
+- `src/demo.ts`, `src/DemoScene.tsx` – demovyn.
+- `src/schedule.ts` – tidplan, färgläggning, generering, import och lagring.
+- `src/App.tsx` – gränssnittet.
 
-The Connect file browser uses the project session and regional Core API endpoints for folder listing and file transfer. Runtime access depends on the extension being launched from a project where it is enabled and on the signed-in user's permissions. Core API operations may additionally require application registration. Do not add client secrets to this frontend.
+## Trimble Connect
 
-The current manifest uses GitHub Pages at `vfalk-ncc.github.io/TC-Codex`. GitHub Pages must be enabled for the repository and the production URL must remain readable by Trimble Connect.
+`public/manifest.json` publiceras på `https://vfalk-ncc.github.io/TC-Codex/manifest.json` och pekar på `#/trimble`. Manifestets sökväg, `icon.svg` och bas-sökvägen `/TC-Codex/` i `vite.config.ts` måste ligga kvar för att extensionen ska fortsätta fungera i projekt där den redan är tillagd.
+
+Push till `main` bygger och publicerar till GitHub Pages via `.github/workflows/deploy-pages.yml`.

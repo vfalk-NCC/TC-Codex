@@ -3,12 +3,4 @@ dist/
 .env
 .env.*
 !.env.example
-*.ifc
-*.ifczip
-*.las
-*.laz
-*.e57
-*.ply
-*.pcd
-*.copc
 *.tsbuildinfo
