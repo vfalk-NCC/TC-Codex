@@ -71,6 +71,7 @@ export class DemoViewer implements ViewerPort {
     this.changed();
   }
   async resetAll() { this.looks.clear(); this.changed(); }
+  async focus() { /* the demo camera is fixed */ }
   async getProperties(_modelId: string, ids: number[]): Promise<ObjInfo[]> {
     const wanted = new Set(ids);
     return this.boxes.filter((b) => wanted.has(b.id)).map((b) => ({ id: b.id, cls: b.cls, props: b.props }));
