@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import DemoScene from './DemoScene';
 import { DemoViewer } from './demo';
+import { applyTheme, storedTheme, type Theme } from './theme';
 import { connectTrimble, type ModelInfo, type ObjRef, type ViewerPort } from './viewer';
 import { Dialog, GenerateDialog, Icon, ImportDialog, MaskDialog, ToolsDialog, count, message } from './parts';
 import {
@@ -121,6 +122,8 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [renaming, setRenaming] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
+  const [theme, setTheme] = useState<Theme>(storedTheme);
+  const toggleTheme = () => { const next = theme === 'dark' ? 'light' : 'dark'; applyTheme(next); setTheme(next); };
 
   const todayDay = useMemo(() => toDay(today()), []);
   const range = useMemo(() => planRange(plan), [plan]);
@@ -300,6 +303,7 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
         <div className="top-actions">
           <button className="ghost" disabled={!canUndo} onClick={undo} aria-label="Ångra" title="Ångra (Ctrl+Z)"><Icon name="undo" /></button>
           <button className="ghost" disabled={!canRedo} onClick={redo} aria-label="Gör om" title="Gör om (Ctrl+Y)"><Icon name="redo" /></button>
+          <button className="ghost" onClick={toggleTheme} aria-label={theme === 'dark' ? 'Byt till ljust tema' : 'Byt till mörkt tema'} title={theme === 'dark' ? 'Ljust tema' : 'Mörkt tema'}><Icon name={theme === 'dark' ? 'sun' : 'moon'} /></button>
           <button className="ghost" onClick={() => setDialog('tools')} aria-label="Verktyg" title="Verktyg"><Icon name="more" /></button>
           <label className="switch" title="Färga modellen efter tidplanen">
             <input type="checkbox" checked={live} onChange={() => { setPlaying(false); setLive(!live); }} /><span className="knob" /><span className="label">Visa i modell</span>

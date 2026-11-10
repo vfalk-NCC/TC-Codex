@@ -19,6 +19,7 @@ Trimble Connect-extension som kopplar modellens objekt till en tidplan och spela
 - **Hitta** – markera ett objekt i modellen för att se vilken aktivitet det tillhör; zooma till en aktivitets objekt; markera objekt som saknar aktivitet.
 
 **Övrigt**
+- **Tema** – mörkt eller ljust, växlas med sol/måne-knappen och sparas i webbläsaren.
 - **Lösenord** – appen frågar efter ett lösenord en gång per webbläsarsession. Det håller bara tillfälliga besökare ute; sidan är publik och koden kan läsas av vem som helst.
 - **Spara** – planen sparas i webbläsaren per projekt. Objekt sparas med IFC-GUID så att kopplingarna överlever nya modellversioner.
 - **Prestanda** – modellen uppdateras bara för de aktiviteter vars utseende ändras, så att antalet anrop till 3D-vyn hålls nere.
