@@ -9,6 +9,8 @@ Trimble Connect-extension som kopplar modellens objekt till en tidplan och spela
 - **Koppla för hand** – markera objekt i 3D-vyn och koppla dem till en aktivitet.
 - **WBS-områden** – egna områden (t.ex. "741 - Sektionsfickor"); dra aktiviteter mellan dem eller till en annan aktivitet för att ändra ordning.
 - **Gantt i listan** – dra en stapel för att flytta aktiviteten i tiden, dra i ändarna för att ändra start eller slut. Tidsaxel med veckonummer och markering för idag.
+- **Milstolpar** – daterade hållpunkter (t.ex. "Tätt hus") som visas som diamanter på tidslinjen, med nedräkning till nästa.
+- **Projektöversikt** – hela projektet från första start till sista slut på en rad, med områden, milstolpar och idag; dra i den för att flytta datumet.
 - **Ångra / gör om** (Ctrl+Z / Ctrl+Y), duplicera aktivitet, sök, förskjut hela planen eller ett område ett antal dagar.
 - **Import och export** – rader med `namn;start;slut;område` från Excel/CSV, export till CSV, och hela planen som JSON.
 

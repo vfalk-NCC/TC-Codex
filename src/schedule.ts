@@ -12,7 +12,10 @@ export type Unlinked = 'show' | 'ghost' | 'hide';
 export type ColorBy = 'activity' | 'type';
 /** Objects kept out of the way (e.g. large slabs or cladding) no matter what the schedule says. */
 export type Mask = { id: string; name: string; mode: 'hide' | 'ghost'; on: boolean; links: Link[] };
-export type Plan = { version: 1; unlinked: Unlinked; colorBy: ColorBy; areas: Area[]; masks: Mask[]; activities: Activity[] };
+/** A dated checkpoint such as "Tätt hus", shown as a diamond on the timeline. */
+export type Milestone = { id: string; name: string; date: string; color: string };
+export const MILESTONE_COLOR = '#ffc83d';
+export type Plan = { version: 1; unlinked: Unlinked; colorBy: ColorBy; areas: Area[]; masks: Mask[]; milestones: Milestone[]; activities: Activity[] };
 /** 'plan' simulates the schedule at a date; 'status' colours by reported progress. */
 export type ViewMode = 'plan' | 'status';
 export type Group = { name: string; refs: ObjRef[] };
@@ -30,7 +33,7 @@ const MASK_GHOST: ObjState = { color: '#9aa3ad', alpha: 22 };
 const MAX_VALUES = 400;
 const CHUNK = 400;
 
-export const emptyPlan = (): Plan => ({ version: 1, unlinked: 'ghost', colorBy: 'activity', areas: [], masks: [], activities: [] });
+export const emptyPlan = (): Plan => ({ version: 1, unlinked: 'ghost', colorBy: 'activity', areas: [], masks: [], milestones: [], activities: [] });
 export const newId = () => Math.random().toString(36).slice(2, 10);
 export const toDay = (iso: string) => Math.round(Date.parse(`${iso}T00:00:00Z`) / 864e5);
 export const toIso = (day: number) => new Date(day * 864e5).toISOString().slice(0, 10);
@@ -40,12 +43,29 @@ export const linkCount = (a: Activity) => a.links.reduce((n, l) => n + (l.guids?
 const dateFormat = new Intl.DateTimeFormat('sv-SE', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 export const formatDay = (day: number) => dateFormat.format(new Date(day * 864e5));
 
+/** The whole project: from the first start to the last finish, milestones included. */
 export function planRange(plan: Plan) {
-  if (!plan.activities.length) { const t = toDay(today()); return { start: t, end: t + 30 }; }
-  return {
-    start: Math.min(...plan.activities.map((a) => toDay(a.start))),
-    end: Math.max(...plan.activities.map((a) => toDay(a.end))),
-  };
+  const starts = [...plan.activities.map((a) => toDay(a.start)), ...plan.milestones.map((m) => toDay(m.date))];
+  const ends = [...plan.activities.map((a) => toDay(a.end)), ...plan.milestones.map((m) => toDay(m.date))];
+  if (!starts.length) { const t = toDay(today()); return { start: t, end: t + 30 }; }
+  return { start: Math.min(...starts), end: Math.max(...ends) };
+}
+
+export type Lane = { from: number; to: number; color: string }[];
+/** Rows for the project overview: one per WBS area, or packed without overlap when there are no areas. */
+export function overviewLanes(plan: Plan, max = 6): Lane[] {
+  const bar = (a: Activity) => ({ from: toDay(a.start), to: toDay(a.end), color: a.color });
+  if (plan.areas.length) {
+    return [...plan.areas.map((x) => x.id), undefined]
+      .map((id) => plan.activities.filter((a) => a.areaId === id).map(bar))
+      .filter((lane) => lane.length);
+  }
+  const rows: Lane[] = [];
+  for (const b of plan.activities.map(bar).sort((x, y) => x.from - y.from)) {
+    const free = rows.find((row) => row[row.length - 1].to < b.from) ?? (rows.length < max ? rows[rows.push([]) - 1] : rows[rows.length - 1]);
+    free.push(b);
+  }
+  return rows;
 }
 
 export type Phase = 'before' | 'active' | 'after';
@@ -88,6 +108,7 @@ export function isoWeek(day: number) {
 export function eventDays(plan: Plan) {
   const days = new Set<number>();
   for (const a of plan.activities) { days.add(toDay(a.start)); days.add(toDay(a.end) + 1); }
+  for (const m of plan.milestones) days.add(toDay(m.date));
   return [...days].sort((x, y) => x - y);
 }
 
@@ -139,7 +160,12 @@ export function moveActivity(plan: Plan, id: string, areaId: string | undefined,
 /** Moves every activity (or those of one area) by a number of days. */
 export function shiftDates(plan: Plan, days: number, areaId?: string | null): Plan {
   const hit = (a: Activity) => areaId === undefined || (a.areaId ?? null) === areaId;
-  return { ...plan, activities: plan.activities.map((a) => (hit(a) ? { ...a, start: toIso(toDay(a.start) + days), end: toIso(toDay(a.end) + days) } : a)) };
+  return {
+    ...plan,
+    // Milestones follow only when the whole plan moves.
+    milestones: areaId === undefined ? plan.milestones.map((m) => ({ ...m, date: toIso(toDay(m.date) + days) })) : plan.milestones,
+    activities: plan.activities.map((a) => (hit(a) ? { ...a, start: toIso(toDay(a.start) + days), end: toIso(toDay(a.end) + days) } : a)),
+  };
 }
 
 export function duplicateActivity(plan: Plan, id: string): Plan {
@@ -156,7 +182,8 @@ export function toCsv(plan: Plan) {
   const rows = plan.activities.map((a) => [
     a.name, a.start, a.end, plan.areas.find((x) => x.id === a.areaId)?.name ?? '', TYPE_LABEL[a.type], STATUS_LABEL[a.status ?? 'todo'], linkCount(a),
   ]);
-  return [['Aktivitet', 'Start', 'Slut', 'Område', 'Typ', 'Status', 'Objekt'], ...rows].map((r) => r.map(cell).join(';')).join('\r\n');
+  const milestones = plan.milestones.map((m) => [m.name, m.date, m.date, '', 'Milstolpe', '', '']);
+  return [['Aktivitet', 'Start', 'Slut', 'Område', 'Typ', 'Status', 'Objekt'], ...rows, ...milestones].map((r) => r.map(cell).join(';')).join('\r\n');
 }
 
 export function removeArea(plan: Plan, areaId: string): Plan {
@@ -501,6 +528,9 @@ export function parsePlan(json: string): Plan | null {
     const masks: Mask[] = (Array.isArray(raw.masks) ? raw.masks : [])
       .filter((m: any) => m && typeof m.id === 'string' && typeof m.name === 'string' && Array.isArray(m.links))
       .map((m: any) => ({ id: m.id, name: m.name, mode: m.mode === 'ghost' ? 'ghost' : 'hide', on: m.on !== false, links: m.links }));
+    const milestones: Milestone[] = (Array.isArray(raw.milestones) ? raw.milestones : [])
+      .filter((m: any) => m && typeof m.id === 'string' && typeof m.name === 'string' && parseDate(String(m.date)))
+      .map((m: any) => ({ id: m.id, name: m.name, date: m.date, color: /^#[0-9a-f]{6}$/i.test(m.color) ? m.color : MILESTONE_COLOR }));
     const activities: Activity[] = raw.activities
       .filter((a: any) => a && typeof a.name === 'string' && parseDate(String(a.start)) && parseDate(String(a.end)))
       .map((a: any, i: number) => ({
@@ -510,7 +540,7 @@ export function parsePlan(json: string): Plan | null {
         areaId: areas.some((x) => x.id === a.areaId) ? a.areaId : undefined,
         status: a.status in STATUS_LABEL ? a.status : 'todo',
       }));
-    return { version: 1, unlinked: ['show', 'ghost', 'hide'].includes(raw.unlinked) ? raw.unlinked : 'ghost', colorBy: raw.colorBy === 'type' ? 'type' : 'activity', areas, masks, activities };
+    return { version: 1, unlinked: ['show', 'ghost', 'hide'].includes(raw.unlinked) ? raw.unlinked : 'ghost', colorBy: raw.colorBy === 'type' ? 'type' : 'activity', areas, masks, milestones, activities };
   } catch {
     return null;
   }

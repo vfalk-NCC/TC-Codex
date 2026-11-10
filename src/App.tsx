@@ -5,10 +5,10 @@ import { applyTheme, storedTheme, type Theme } from './theme';
 import { connectTrimble, type ModelInfo, type ObjRef, type ViewerPort } from './viewer';
 import { Dialog, GenerateDialog, Icon, ImportDialog, MaskDialog, ToolsDialog, count, message } from './parts';
 import {
-  LinkResolver, OwnerIndex, PALETTE, Painter, STATUS_COLOR, STATUS_LABEL, TYPE_LABEL, axisTicks, duplicateActivity, emptyPlan, eventDays, formatDay,
-  importDates, isLate, isoWeek, linkCount, loadPlan, makeLinks, mergeLinks, moveActivity, newId, parsePlan, phaseOf, planRange, progress, removeArea,
+  LinkResolver, MILESTONE_COLOR, OwnerIndex, PALETTE, Painter, STATUS_COLOR, STATUS_LABEL, TYPE_LABEL, axisTicks, duplicateActivity, emptyPlan, eventDays, formatDay,
+  importDates, isLate, isoWeek, linkCount, loadPlan, makeLinks, mergeLinks, moveActivity, newId, overviewLanes, parsePlan, phaseOf, planRange, progress, removeArea,
   savePlan, shiftDates, statusCounts, toCsv, toDay, toIso, today,
-  type Activity, type ActivityType, type Area, type Link, type Plan, type Status, type ViewMode,
+  type Activity, type ActivityType, type Area, type Link, type Milestone, type Plan, type Status, type ViewMode,
 } from './schedule';
 
 /** SHA-256 of the access code. This only keeps casual visitors out: the app is a public static site, so it is not real access control. */
@@ -134,6 +134,9 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
   const stats = useMemo(() => progress(plan, day), [plan, day]);
   const counts = useMemo(() => statusCounts(plan, todayDay), [plan, todayDay]);
   const ticks = useMemo(() => axisTicks(min, max), [min, max]);
+  const lanes = useMemo(() => overviewLanes(plan), [plan]);
+  const milestones = useMemo(() => [...plan.milestones].sort((a, b) => a.date.localeCompare(b.date)), [plan.milestones]);
+  const nextMilestone = milestones.find((m) => toDay(m.date) >= day);
   const selected = count(selection);
   const hits = useMemo(() => (owner && selected ? owner.activitiesOf(selection) : new Set<string>()), [owner, selection, selected]);
   const pct = (d: number) => ((d - min) / span) * 100;
@@ -234,6 +237,18 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
     setOpen(activity.id);
     setQuery('');
   };
+  const addMilestone = () => {
+    const milestone: Milestone = { id: newId(), name: `Milstolpe ${plan.milestones.length + 1}`, date: toIso(mode === 'status' ? todayDay : Math.min(range.end, Math.max(range.start, day))), color: MILESTONE_COLOR };
+    setPlan((p) => ({ ...p, milestones: [...p.milestones, milestone] }));
+    setCollapsed((c) => { const next = new Set(c); next.delete('milestones'); return next; });
+    setOpen(milestone.id);
+  };
+  const updateMilestone = (id: string, patch: Partial<Milestone>) =>
+    setPlan((p) => ({ ...p, milestones: p.milestones.map((m) => (m.id === id ? { ...m, ...patch } : m)) }), 'name' in patch || 'color' in patch ? `ms:${id}:${Object.keys(patch)}` : '');
+  const scrub = (e: React.PointerEvent<HTMLDivElement>) => {
+    const box = e.currentTarget.getBoundingClientRect();
+    showAt(Math.round(min + ((e.clientX - box.left) / box.width) * span));
+  };
   const addArea = () => {
     const area: Area = { id: newId(), name: 'Nytt område' };
     setPlan((p) => ({ ...p, areas: [...p.areas, area] }));
@@ -324,7 +339,29 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
             <strong>{formatDay(day)}</strong><span className="week">v.{isoWeek(day)}</span>
             <span className="pct">{stats.total ? `${Math.round((stats.done / stats.total) * 100)} %` : '–'}<small>färdigt</small></span>
           </div>
+          <div className="overview" aria-hidden="true">
+            <div className="overview-inner" title="Hela projektet – dra för att flytta datumet"
+              onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); scrub(e); }} onPointerMove={(e) => e.buttons === 1 && scrub(e)}>
+              <div className="ms-lane">
+                {milestones.map((m) => <span key={m.id} className={`ms${toDay(m.date) <= day ? ' reached' : ''}`} style={{ left: `${pct(toDay(m.date))}%`, '--c': m.color } as React.CSSProperties} title={`${m.name} · ${formatDay(toDay(m.date))}`} />)}
+              </div>
+              <div className="lanes">
+                {lanes.map((lane, i) => (
+                  <div key={i} className="lane">
+                    {lane.map((b, j) => <i key={j} className={b.to < day ? 'past' : ''} style={{ left: `${pct(b.from)}%`, width: `${((b.to - b.from + 1) / span) * 100}%`, '--c': b.color } as React.CSSProperties} />)}
+                  </div>
+                ))}
+              </div>
+              {todayDay >= min && todayDay <= max && <span className="today" style={{ left: `${pct(todayDay)}%` }} />}
+              <span className="cursor" style={{ left: `${pct(day)}%` }} />
+            </div>
+          </div>
           <input className="timeline" type="range" min={min} max={max} value={day} aria-label="Datum" style={{ '--p': `${pct(day)}%` } as React.CSSProperties} onChange={(e) => showAt(Number(e.target.value))} />
+          <div className="span-line">
+            <span>{formatDay(range.start)}</span>
+            <span>{plan.activities.length || plan.milestones.length ? `${Math.max(1, Math.round((range.end - range.start + 1) / 7))} veckor` : ''}</span>
+            <span>{formatDay(range.end)}</span>
+          </div>
           <div className="controls">
             <button className="ghost" onClick={() => jump(-1)} aria-label="Föregående händelse" title="Föregående händelse"><Icon name="skipBack" /></button>
             <button className="ghost" onClick={() => showAt(day - 1)} aria-label="En dag bakåt" title="En dag bakåt (←)"><Icon name="left" /></button>
@@ -339,6 +376,14 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
               <option value={30}>1 månad/s</option>
             </select>
           </div>
+          {nextMilestone && (
+            <div className="next-ms">
+              <span className={`ms inline${toDay(nextMilestone.date) === day ? ' reached' : ''}`} style={{ '--c': nextMilestone.color } as React.CSSProperties} />
+              {toDay(nextMilestone.date) === day
+                ? <b>{nextMilestone.name} – uppnådd</b>
+                : <>Nästa milstolpe: <button className="link" onClick={() => showAt(toDay(nextMilestone.date))}>{nextMilestone.name}</button> om {toDay(nextMilestone.date) - day} d</>}
+            </div>
+          )}
           <div className="active-line">{stats.active.length ? <>Pågår: {stats.active.map((a) => <button key={a.id} className="chip" style={{ '--c': a.color } as React.CSSProperties} onClick={() => reveal(a.id)}>{a.name}</button>)}</> : ' '}</div>
         </> : <>
           <div className="date-line"><strong>Läget idag</strong><span className="week">v.{isoWeek(todayDay)}</span><span className="pct">{plan.activities.length ? `${Math.round((counts.done / plan.activities.length) * 100)} %` : '–'}<small>klart</small></span></div>
@@ -377,20 +422,55 @@ function Studio({ viewer }: { viewer: ViewerPort }) {
         <label className="search"><Icon name="search" size={14} /><input value={query} placeholder="Sök aktivitet" aria-label="Sök aktivitet" onChange={(e) => setQuery(e.target.value)} /></label>
         <button onClick={() => addActivity()}><Icon name="plus" size={14} />Aktivitet</button>
         <button onClick={addArea}><Icon name="plus" size={14} />Område</button>
+        <button onClick={addMilestone}><Icon name="plus" size={14} />Milstolpe</button>
         <button disabled={!models.length} onClick={() => setDialog('generate')}>Från modell</button>
       </div>
 
       <section className="activities">
-        {plan.activities.length > 0 && (
+        {(plan.activities.length > 0 || plan.milestones.length > 0) && (
           <div className="axis" onClick={(e) => { const box = e.currentTarget.getBoundingClientRect(); showAt(Math.round(min + ((e.clientX - box.left - 14) / (box.width - 28)) * span)); }} title="Klicka för att gå till ett datum">
             <div className="axis-inner">
               {ticks.map((t) => <span key={t.at} className="tick" style={{ left: `${pct(t.at)}%` }}>{t.label}</span>)}
+              {milestones.map((m) => <span key={m.id} className={`ms small${toDay(m.date) <= day ? ' reached' : ''}`} style={{ left: `${pct(toDay(m.date))}%`, '--c': m.color } as React.CSSProperties} title={`${m.name} · ${formatDay(toDay(m.date))}`} />)}
               {todayDay >= min && todayDay <= max && <span className="today" style={{ left: `${pct(todayDay)}%` }} title="Idag" />}
               <span className="cursor" style={{ left: `${pct(day)}%` }} />
             </div>
           </div>
         )}
-        {!plan.activities.length && !plan.areas.length && (
+        {milestones.length > 0 && !needle && (
+          <section className="area milestones" aria-label="Milstolpar">
+            <div className="area-head">
+              <button className={`ghost fold${collapsed.has('milestones') ? ' closed' : ''}`} onClick={() => toggleCollapsed('milestones')} aria-expanded={!collapsed.has('milestones')} aria-label={collapsed.has('milestones') ? 'Visa milstolpar' : 'Dölj milstolpar'}><Icon name="down" /></button>
+              <span className="area-name">Milstolpar</span>
+              <span className="meta">{milestones.filter((m) => toDay(m.date) <= todayDay).length}/{milestones.length} passerade</span>
+            </div>
+            {!collapsed.has('milestones') && milestones.map((m) => {
+              const at = toDay(m.date), left = at - todayDay;
+              return (
+                <article key={m.id} className={`milestone${at <= day ? ' reached' : ''}${open === m.id ? ' open' : ''}`} style={{ '--c': m.color } as React.CSSProperties}>
+                  <div className="row">
+                    <button className="ghost" onClick={() => showAt(at)} aria-label={`Gå till ${m.name}`} title="Gå till datumet"><span className={`ms inline${at <= day ? ' reached' : ''}`} /></button>
+                    <button className="name" onClick={() => setOpen(open === m.id ? null : m.id)} aria-expanded={open === m.id}>{m.name || 'Namnlös milstolpe'}</button>
+                    <span className="when">{formatDay(at)} · v.{isoWeek(at)}</span>
+                    <span className={`countdown${left < 0 ? ' passed' : ''}`}>{left === 0 ? 'idag' : left > 0 ? `om ${left} d` : 'passerad'}</span>
+                  </div>
+                  {open === m.id && (
+                    <div className="editor">
+                      <label className="wide">Namn<input value={m.name} onChange={(e) => updateMilestone(m.id, { name: e.target.value })} /></label>
+                      <label>Datum<input type="date" value={m.date} onChange={(e) => e.target.value && updateMilestone(m.id, { date: e.target.value })} /></label>
+                      <label>Färg<input type="color" value={m.color} onChange={(e) => updateMilestone(m.id, { color: e.target.value })} /></label>
+                      <div className="wide buttons">
+                        <button onClick={() => showAt(at)}>Visa i modellen</button>
+                        <button className="danger" onClick={() => setPlan((p) => ({ ...p, milestones: p.milestones.filter((x) => x.id !== m.id) }))}>Ta bort</button>
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </section>
+        )}
+        {!plan.activities.length && !plan.areas.length && !plan.milestones.length && (
           <div className="empty">
             <span className="orb big" />
             <p>Skapa en tidplan direkt från modellen, till exempel en aktivitet per våning eller nedifrån och upp.</p>
